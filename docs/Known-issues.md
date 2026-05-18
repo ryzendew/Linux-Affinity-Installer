@@ -1,4 +1,4 @@
-# Known Issues ⚠️
+# Known Issues
 
 This document lists known issues and their workarounds. For the latest updates, check the [GitHub Issues](https://github.com/ryzendew/AffinityOnLinux/issues) page.
 
@@ -70,8 +70,6 @@ This document lists known issues and their workarounds. For the latest updates, 
 
 **Workaround:** Use the [AppImage installer](../INSTALLATION.md#1-appimage-recommended-for-beginners) instead. See [System Requirements](SYSTEM-REQUIREMENTS.md) for details.
 
-**Workaround:** Use the [AppImage installer](../INSTALLATION.md#1-appimage-recommended-for-beginners) instead.
-
 ### Read-Only Filesystem Support (SteamOS, Silverblue, etc.)
 **Issue:** The installer may not work correctly on read-only filesystems like SteamOS or Silverblue.
 
@@ -84,12 +82,12 @@ This document lists known issues and their workarounds. For the latest updates, 
 
 ## Hardware Acceleration Issues
 
-### AMD/Intel GPU OpenCL Issues
-**Issue:** OpenCL may not work correctly on AMD and Intel GPUs.
+### Intel GPU OpenCL Issues
+**Issue:** OpenCL may not work correctly on Intel GPUs.
 
 **Workaround:** Use vkd3d-proton or DXVK instead of OpenCL. See [Hardware Acceleration](HARDWARE-ACCELERATION.md) for details.
 
-**Note:** We cannot fix AMD/Intel GPU OpenCL issues as we do not have access to these GPUs for testing.
+**Note:** The OpenCL patches have only been tested on AMD GPUs. Intel GPU support (Mesa Rusticl / compute-runtime) is untested.
 
 ## Application Features
 
@@ -101,7 +99,6 @@ This document lists known issues and their workarounds. For the latest updates, 
 **Impact:**
 - Help system in Affinity v3 may not work
 - Some web-based dialogs may fail to load
-- Canva sign-in dialog may not function properly
 
 **Workaround:**
 - Use the application's built-in help files if available
@@ -109,15 +106,6 @@ This document lists known issues and their workarounds. For the latest updates, 
 - This is a Wine limitation and cannot be resolved until Wine improves WebView2 support
 
 **Note:** Do not open issues about WebView2 - this is a known limitation that cannot be fixed.
-
-### Login/Authentication Issues
-**Issue:** Logging into Affinity applications does not work properly. Authentication dialogs may fail or not function as expected.
-
-**Note:** This is due to Wine's limited support for web-based authentication systems.
-
-**Workaround:**
-- Use Affinity applications without logging in (they work fully offline)
-- If account features are needed, consider using the Windows version in a virtual machine
 
 ## Wine Version Issues
 

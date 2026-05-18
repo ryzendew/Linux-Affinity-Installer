@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>SharedStorageAccessManagerFix</AssemblyName>
+    <RootNamespace>SharedStorageAccessManagerFix</RootNamespace>
+    <EnableSourceLink>false</EnableSourceLink>
+    <EnableSourceControl>false</EnableSourceControl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Mono.Cecil" Version="0.11.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- AffinitySendURL.cs is compiled separately with Wine's mcs, not dotnet -->
+    <Compile Remove="AffinitySendURL.cs" />
+  </ItemGroup>
+
+</Project>

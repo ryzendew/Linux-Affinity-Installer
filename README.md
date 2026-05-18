@@ -1,111 +1,138 @@
-# AffinityOnLinux
+# Affinity Linux Fixes: OpenCL GPU Acceleration + Canva OAuth Login
 
-> **⚠️ IMPORTANT: Before Opening Issues**
-> 
-> **DO NOT open GitHub issues until you have:**
-> - Read this README completely
-> - Read all documentation pages (Installation Guide, Known Issues, System Requirements, etc.)
-> - Searched existing issues for similar problems
-> - Checked the [Known Issues](docs/Known-issues.md) page
-> 
-> **Issues opened without reading the documentation will be closed immediately.**
-> 
-> Please take the time to read through all the documentation - it contains answers to most common questions and problems.
+Patches and scripts enabling full OpenCL hardware acceleration and Canva/OAuth
+sign-in for Affinity Suite v3.2 under Wine (ElementalWarriorWine 11.0).
 
----
+Tested on EndeavourOS (Arch) with AMD RX 9070 XT + Ryzen 7 7800X3D.
+The Wine OpenCL patch uses only standard OpenCL 1.1 API. Tested on AMD ROCm;
+should work with NVIDIA and Intel (Mesa Rusticl / compute-runtime) but
+untested on those vendors.
 
-A comprehensive solution for running [Affinity software](https://www.affinity.studio/) on GNU/Linux systems using Wine with hardware acceleration support.
+## Issues Resolved
 
-<img width="1275" height="1323" alt="Affinity Linux Installer" src="https://github.com/user-attachments/assets/b04e7307-ed95-484d-931a-713aadfe6c47" />
+These patches resolve two entries previously in `docs/Known-issues.md`:
 
-## What is This?
+- **"AMD/Intel GPU OpenCL Issues"** -- fixed on AMD with the Wine
+  clSetEventCallback patch + libraster binary patches. Intel untested but
+  uses the same standard OpenCL 1.1 API.
 
-AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer, Publisher, and the unified Affinity v3 application on Linux. The installer automatically sets up Wine (a compatibility layer for running Windows applications) with all necessary configurations, dependencies, and optimizations.
+- **"Login/Authentication Issues"** -- fixed with the TLS relay + IL patch +
+  named pipe IPC.
+
+Also fixes OpenCL rendering corruption (tiled artifacts, blank regions when
+using GPU-accelerated filters) caused by Wine's stubbed clSetEventCallback.
+
+## What's Included
+
+### OpenCL GPU Acceleration
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| Wine clSetEventCallback | `Patch/OpenCLEventCallback/` | Implement missing OpenCL callback API (fixes rendering corruption) |
+| libraster.dll patcher | `AffinityScripts/AffinityOpenCLPatch.sh` | Bypass DXGI/D3D10/D3D12 device discovery stubs |
+| GPU_DEVICE_ORDINAL | Environment variable | Hide APU iGPU on dual-GPU AMD systems |
+
+See [docs/OPENCL-ACCELERATION.md](docs/OPENCL-ACCELERATION.md) for details.
+
+### Canva OAuth Login
+
+| Component | Location | Purpose |
+|-----------|----------|---------|
+| TLS relay | `AffinityScripts/AffinityTLSRelay.sh` | Bridge Wine-Mono's legacy TLS to modern ECDHE ciphers |
+| IL patcher | `Patch/SharedStorageAccessManagerFix/` | Bypass WinRT TypeLoadException in ProcessCommandLineArguments |
+| Named pipe IPC | `Patch/SharedStorageAccessManagerFix/AffinitySendURL.cs` | Deliver OAuth callback URL without launching second instance |
+| URL handler | `AffinityScripts/AffinityURLHandler.sh` | Desktop protocol handler for affinity:// URLs |
+
+See [docs/CANVA-OAUTH-LOGIN.md](docs/CANVA-OAUTH-LOGIN.md) for details.
+
+### Updated Documentation
+
+| File | Changes |
+|------|---------|
+| `docs/Known-issues.md` | Removed AMD/Intel OpenCL and Login/Auth entries (now fixed). Added narrower "Intel GPU OpenCL Issues" entry (untested). Removed Canva from WebView2 impact list. |
+| `docs/OpenCL-Guide.md` | Updated GPU compatibility (AMD tested, Intel untested). Added Steps 3-5 for Wine OpenCL patch, libraster patch, and env vars. Added troubleshooting for rendering corruption and APU+dGPU crashes. |
+
+## Directory Structure
+
+```
+AffinityScripts/
+  AffinityLinuxInstaller.py       Modified installer (new OpenCL + Canva buttons/methods)
+  AffinityOpenCLPatch.sh          libraster.dll binary patcher
+  AffinityTLSRelay.sh             TLS relay for OAuth
+  AffinityURLHandler.sh           affinity:// protocol handler
+  affinity-url-handler.desktop    XDG desktop entry template for URL handler
+
+Patch/
+  OpenCLEventCallback/            Wine clSetEventCallback implementation
+    pe_wrappers.patch               Diff against upstream Wine
+    pe_thunks.patch                 Diff against upstream Wine
+    pe_wrappers.c                   Full patched source
+    pe_thunks.c                     Full patched source
+    prebuilt/opencl.dll             Pre-built x86_64 DLL
+    README.md                       Build instructions
+  SharedStorageAccessManagerFix/   IL patcher + OAuth IPC tool
+    SharedStorageAccessManagerFix.cs
+    SharedStorageAccessManagerFix.csproj
+    AffinitySendURL.cs
+
+docs/
+  Known-issues.md                 Updated known issues
+  OpenCL-Guide.md                 Updated OpenCL setup guide
+  OPENCL-ACCELERATION.md          Technical details of OpenCL patches
+  CANVA-OAUTH-LOGIN.md            Technical details of OAuth fixes
+```
 
 ## Quick Start
 
-**New to Linux or want the easiest option?** Use the AppImage:
-
-1. Download the AppImage from [GitHub Releases](https://github.com/ryzendew/AffinityOnLinux/releases/tag/Affinity-wine-10.10-Appimage)
-2. Make it executable: `chmod +x Affinity-3-x86_64.AppImage`
-3. Run it: `./Affinity-3-x86_64.AppImage`
-
-**Want full features and latest updates?** Use the Python GUI Installer:
+### OpenCL GPU Acceleration
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/main/AffinityScripts/AffinityLinuxInstaller.py | python3
+# 1. Install Wine OpenCL patch (one-time)
+WINE_DIR="$HOME/.AffinityLinux/ElementalWarriorWine"
+cp "$WINE_DIR/lib/wine/x86_64-windows/opencl.dll" "$WINE_DIR/lib/wine/x86_64-windows/opencl.dll.orig"
+cp Patch/OpenCLEventCallback/prebuilt/opencl.dll "$WINE_DIR/lib/wine/x86_64-windows/opencl.dll"
+cp Patch/OpenCLEventCallback/prebuilt/opencl.dll "$HOME/.AffinityLinux/drive_c/windows/system32/opencl.dll"
+
+# 2. Patch libraster.dll (re-run after Affinity updates)
+AffinityScripts/AffinityOpenCLPatch.sh
 ```
 
-<details>
-<summary><strong>Python GUI Dependencies</strong></summary>
+### Canva OAuth Login
 
-The installer will attempt to install PyQt6 automatically if missing. If automatic installation fails, install it manually:
-
-**Arch/Artix/CachyOS/EndeavourOS/XeroLinux:**
 ```bash
-sudo pacman -S python-pyqt6
+# 3. Build IL patcher (one-time)
+cd Patch/SharedStorageAccessManagerFix && dotnet build -c Release && cd ../..
+
+# 4. Patch Serif.Affinity.dll (re-run after Affinity updates)
+dotnet Patch/SharedStorageAccessManagerFix/bin/Release/net8.0/SharedStorageAccessManagerFix.dll \
+    "$HOME/.AffinityLinux/drive_c/Program Files/Affinity/Affinity/Serif.Affinity.dll"
+
+# 5. Set up TLS relay (one-time, requires sudo)
+AffinityScripts/AffinityTLSRelay.sh setup
+
+# 6. Build and install URL handler (one-time)
+WINE="$HOME/.AffinityLinux/ElementalWarriorWine/bin/wine"
+$WINE mcs -out:AffinityScripts/AffinitySendURL.exe \
+    Patch/SharedStorageAccessManagerFix/AffinitySendURL.cs
+
+SCRIPT_DIR="$(cd AffinityScripts && pwd)"
+sed "s|PLACEHOLDER_SCRIPT_PATH|${SCRIPT_DIR}/AffinityURLHandler.sh|" \
+    AffinityScripts/affinity-url-handler.desktop \
+    > ~/.local/share/applications/affinity-url-handler.desktop
+xdg-mime default affinity-url-handler.desktop x-scheme-handler/affinity
 ```
 
-**Fedora/Nobara:**
-```bash
-sudo dnf install python3-pyqt6 python3-pyqt6-svg
-```
+## Compatibility
 
-**openSUSE (Tumbleweed/Leap):**
-```bash
-sudo zypper install python313-PyQt6
-```
+These patches are for the **Python GUI installer** method (`AffinityLinuxInstaller.py`).
+They are not compatible with the AppImage distribution, which bundles its own
+Wine and wineprefix internally. AppImage integration would require rebuilding
+the AppImage with the patched `opencl.dll` and scripts included.
 
-**PikaOS:** 
-```bash
-sudo apt install python3-pyqt6.qtsvg
-```
+## Dependencies
 
-**Ubuntu 25.10:** If you encounter GUI issues, also install:
-```bash
-sudo apt install python3-pyqt6.qtsvg
-```
-
-</details>
-
-## Documentation
-
-### Getting Started
-- **[Installation Guide](docs/INSTALLATION.md)** - Complete installation instructions for all methods
-- **[System Requirements](docs/SYSTEM-REQUIREMENTS.md)** - Supported distributions and dependencies
-- **[GUI Installer Guide](Guide/GUI-Installer-Guide.md)** - Step-by-step GUI installer instructions
-
-### Technical Details
-- **[Wine Versions](docs/WINE-VERSIONS.md)** - Available Wine versions and recommendations
-- **[Hardware Acceleration](docs/HARDWARE-ACCELERATION.md)** - GPU acceleration options (vkd3d-proton, DXVK, OpenCL)
-- **[OpenCL Guide](docs/OpenCL-Guide.md)** - Detailed OpenCL configuration
-- **[Legacy Scripts](docs/LEGACY-SCRIPTS.md)** - Command-line installation scripts
-
-### Additional Resources
-- **[Known Issues](docs/Known-issues.md)** - Common problems and solutions
-- **[Settings Guide](Guide/Settings.md)** - Configuration options
-
-## Getting Help
-
-- **Discord Community:** [Join our Discord server](https://discord.gg/DW2X8MHQuh) for support and discussions
-- **GitHub Issues:** Report bugs and request features on GitHub
-- **Documentation:** Check the guides and documentation linked above
-
-## Important Notes
-
-### Support Limitations
-
-- **AMD/Intel GPU Issues:** I cannot fix OpenCL or Wine GPU bugs for AMD/Intel GPUs as I do not have access to these GPUs for testing. Use vkd3d-proton or DXVK instead (see [Hardware Acceleration](docs/HARDWARE-ACCELERATION.md)).
-- **Unsupported Distributions:** No support provided for Bazzite, Manjaro. Use AppImage at your own risk (see [System Requirements](docs/SYSTEM-REQUIREMENTS.md)).
-
-## Contributing
-
-Contributions are welcome! See [docs/CONTRIBUTING.md](docs/CONTRIBUTING.md) for guidelines.
-
-## License
-
-This project provides installation scripts and configurations for running Affinity software on Linux. Affinity software is a commercial product by Serif (Europe) Ltd. Please ensure you have a valid license before installing.
-
----
-
-**Disclaimer:** This project is not affiliated with, endorsed by, or associated with Serif (Europe) Ltd. All trademarks and registered trademarks are the property of their respective owners.
+- ElementalWarriorWine 11.0
+- .NET SDK 8.0+ (for building IL patcher)
+- `python3` (for libraster binary patcher)
+- `socat` (for TLS relay)
+- `dig` (from `bind-tools` or `dnsutils`)

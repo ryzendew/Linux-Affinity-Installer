@@ -2206,12 +2206,6 @@ class AffinityInstallerGUI(QMainWindow):
                     "Install Affinity or any Windows app from a local .exe file",
                     "folderopen",
                 ),
-                (
-                    "Enable OpenCL",
-                    self.enable_opencl_support,
-                    "Enable OpenCL support for hardware acceleration in Affinity applications",
-                    "lightning",
-                ),
             ],
         )
         container_layout.addWidget(sys_group)
@@ -2345,6 +2339,18 @@ class AffinityInstallerGUI(QMainWindow):
                     self.install_affinity_plugin_loader,
                     "Download and install the latest AffinityPluginLoader + WineFix from GitHub. Also updates Affinity.desktop to launch via AffinityHook.exe",
                     "wand",
+                ),
+                (
+                    "Patch OpenCL (GPU Acceleration)",
+                    self.apply_opencl_patches,
+                    "Install Wine OpenCL fix and patch libraster.dll for GPU-accelerated filters. Tested on AMD GPUs.",
+                    "wand",
+                ),
+                (
+                    "Enable Canva Login",
+                    self.setup_canva_login,
+                    "Set up TLS relay and OAuth patches for Canva sign-in. Requires socat and .NET SDK 8.0+",
+                    "chrome",
                 ),
             ],
         )
@@ -14161,6 +14167,12 @@ Would you like to continue with {distro_name} anyway?"""
                 else:
                     self.log("No Affinity applications found to configure", "info")
 
+                # Apply OpenCL event callback and libraster patches
+                self.update_progress_text("Applying OpenCL acceleration patches...")
+                self.ensure_opencl_patch_files(silent=True)
+                self.install_opencl_dll_patch()
+                self.run_libraster_patcher()
+
                 self.update_progress(1.0)
                 self.update_progress_text("OpenCL support enabled!")
 
@@ -15121,7 +15133,13 @@ Would you like to continue with {distro_name} anyway?"""
             return False
 
         # Run the settings patcher
-        return self.run_affinity_patcher(str(dll_path))
+        result = self.run_affinity_patcher(str(dll_path))
+
+        # Also apply SharedStorageAccessManager fix for OAuth support
+        self.ensure_ssa_fix_files(silent=True)
+        self.run_ssa_fix(str(dll_path))
+
+        return result
 
     def create_desktop_entry(self, app_name):
         """Create desktop entry for application"""
@@ -16831,6 +16849,699 @@ Would you like to continue with {distro_name} anyway?"""
                 "error",
             )
 
+    # =========================================================================
+    # OpenCL GPU Acceleration Patches
+    # =========================================================================
+
+    def ensure_opencl_patch_files(self, silent=False):
+        """Ensure OpenCL patch files are available in .AffinityLinux/Patch/"""
+        try:
+            dest_dir = Path(self.directory) / "Patch" / "OpenCLEventCallback"
+            prebuilt_dir = dest_dir / "prebuilt"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            prebuilt_dir.mkdir(parents=True, exist_ok=True)
+
+            # Files to copy/download
+            files_to_get = {
+                "prebuilt/opencl.dll": "https://raw.githubusercontent.com/ryzendew/Linux-Affinity-Installer/main/Patch/OpenCLEventCallback/prebuilt/opencl.dll",
+            }
+
+            # Try local copy first
+            script_dir = Path(__file__).parent
+            source_dir = script_dir.parent / "Patch" / "OpenCLEventCallback"
+
+            for filename, github_url in files_to_get.items():
+                dest_file = dest_dir / filename
+                if dest_file.exists() and dest_file.stat().st_size > 0:
+                    continue
+
+                source_file = source_dir / filename
+                if source_file.exists():
+                    try:
+                        shutil.copy2(source_file, dest_file)
+                        if not silent:
+                            self.log(f"Copied {filename} to Patch/OpenCLEventCallback/", "info")
+                        continue
+                    except Exception as e:
+                        if not silent:
+                            self.log(f"Failed to copy {filename} from local: {e}", "warning")
+
+                if not dest_file.exists():
+                    if not silent:
+                        self.log(f"Downloading {filename} from GitHub...", "info")
+                    try:
+                        if self.download_file(github_url, str(dest_file), filename):
+                            if not silent:
+                                self.log(f"Downloaded {filename}", "success")
+                        else:
+                            if not silent:
+                                self.log(f"Failed to download {filename}", "error")
+                            return False
+                    except Exception as e:
+                        if not silent:
+                            self.log(f"Error downloading {filename}: {e}", "error")
+                        return False
+
+            return True
+        except Exception as e:
+            if not silent:
+                self.log(f"Error ensuring OpenCL patch files: {e}", "error")
+            return False
+
+    def install_opencl_dll_patch(self):
+        """Install the patched opencl.dll that implements clSetEventCallback"""
+        wine_dir = self.get_wine_dir()
+        if not wine_dir or not wine_dir.exists():
+            self.log("Wine directory not found", "error")
+            return False
+
+        opencl_dst = wine_dir / "lib" / "wine" / "x86_64-windows" / "opencl.dll"
+        opencl_sys = Path(self.directory) / "drive_c" / "windows" / "system32" / "opencl.dll"
+        prebuilt = Path(self.directory) / "Patch" / "OpenCLEventCallback" / "prebuilt" / "opencl.dll"
+
+        if not prebuilt.exists():
+            self.log("Pre-built opencl.dll not found", "error")
+            return False
+
+        # Check if already installed (same size = likely same file)
+        if opencl_dst.exists() and opencl_dst.stat().st_size == prebuilt.stat().st_size:
+            self.log("Wine OpenCL patch already installed", "success")
+            return True
+
+        # Back up originals
+        for dst in [opencl_dst, opencl_sys]:
+            if dst.exists():
+                backup = dst.with_suffix(".dll.orig")
+                if not backup.exists():
+                    try:
+                        shutil.copy2(dst, backup)
+                        self.log(f"Backed up {dst.name} to {backup.name}", "info")
+                    except Exception as e:
+                        self.log(f"Warning: Could not back up {dst}: {e}", "warning")
+
+        # Install
+        try:
+            shutil.copy2(prebuilt, opencl_dst)
+            self.log("Installed patched opencl.dll to Wine directory", "success")
+        except Exception as e:
+            self.log(f"Failed to install opencl.dll to Wine: {e}", "error")
+            return False
+
+        try:
+            shutil.copy2(prebuilt, opencl_sys)
+            self.log("Installed patched opencl.dll to system32", "success")
+        except Exception as e:
+            self.log(f"Warning: Could not copy to system32: {e}", "warning")
+
+        return True
+
+    def run_libraster_patcher(self):
+        """Run the libraster.dll binary patcher for OpenCL device discovery bypass"""
+        libraster = (
+            Path(self.directory)
+            / "drive_c"
+            / "Program Files"
+            / "Affinity"
+            / "Affinity"
+            / "libraster.dll"
+        )
+
+        if not libraster.exists():
+            self.log(f"libraster.dll not found at: {libraster}", "warning")
+            return False
+
+        # Find the patcher script
+        script_dir = Path(__file__).parent
+        patcher_script = script_dir / "AffinityOpenCLPatch.sh"
+
+        if not patcher_script.exists():
+            # Try from installed location
+            patcher_script = Path(self.directory) / "scripts" / "AffinityOpenCLPatch.sh"
+
+        if not patcher_script.exists():
+            self.log("AffinityOpenCLPatch.sh not found", "error")
+            return False
+
+        self.log("Patching libraster.dll for OpenCL device discovery...", "info")
+
+        env = os.environ.copy()
+        env["WINEPREFIX"] = self.directory
+
+        success, stdout, stderr = self.run_command(
+            ["bash", str(patcher_script), str(libraster)],
+            check=False,
+            capture=True,
+            env=env,
+        )
+
+        if stdout:
+            for line in stdout.strip().split("\n"):
+                if line.strip():
+                    if "[✓]" in line or "success" in line.lower() or "applied" in line.lower():
+                        self.log(line.strip(), "success")
+                    elif "[ERROR]" in line or "error" in line.lower():
+                        self.log(line.strip(), "error")
+                    elif "[WARNING]" in line:
+                        self.log(line.strip(), "warning")
+                    else:
+                        self.log(line.strip(), "info")
+
+        if success:
+            self.log("libraster.dll OpenCL patches applied", "success")
+            return True
+        else:
+            self.log(f"libraster.dll patching failed: {stderr}", "error")
+            return False
+
+    def apply_opencl_patches(self):
+        """Apply all OpenCL hardware acceleration patches (UI button handler)"""
+        try:
+            self.log(
+                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.log("Patch OpenCL (GPU Acceleration)", "info")
+            self.log(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+
+            # Check Wine is set up
+            wine = self.get_wine_path("wine")
+            if not wine.exists():
+                self.log("Wine is not set up. Please run 'Setup Wine Environment' first.", "error")
+                self.show_message(
+                    "Wine Not Found",
+                    "Wine must be installed before applying OpenCL patches.\n\n"
+                    "Please run 'One-Click Setup' or 'Setup Wine Environment' first.",
+                    "warning",
+                )
+                return
+
+            # Check Affinity is installed
+            libraster = (
+                Path(self.directory)
+                / "drive_c"
+                / "Program Files"
+                / "Affinity"
+                / "Affinity"
+                / "libraster.dll"
+            )
+            if not libraster.exists():
+                self.log("Affinity is not installed. Please install it first.", "error")
+                self.show_message(
+                    "Affinity Not Found",
+                    "Affinity must be installed before applying OpenCL patches.",
+                    "warning",
+                )
+                return
+
+            self.start_operation("Apply OpenCL Patches")
+
+            def apply_opencl_thread():
+                try:
+                    self.update_progress(0.0)
+                    self.update_progress_text("Downloading OpenCL patch files...")
+
+                    # Step 1: Ensure patch files are available
+                    if not self.ensure_opencl_patch_files():
+                        self.log("Failed to obtain OpenCL patch files", "error")
+                        self.end_operation()
+                        return
+                    self.update_progress(0.3)
+
+                    # Step 2: Install patched opencl.dll
+                    self.update_progress_text("Installing Wine OpenCL patch...")
+                    if not self.install_opencl_dll_patch():
+                        self.log("Failed to install Wine OpenCL patch", "error")
+                        self.end_operation()
+                        return
+                    self.update_progress(0.6)
+
+                    # Step 3: Patch libraster.dll
+                    self.update_progress_text("Patching libraster.dll...")
+                    self.run_libraster_patcher()
+                    self.update_progress(0.9)
+
+                    # Step 4: Set GPU_DEVICE_ORDINAL hint
+                    if self.has_amd_gpu():
+                        self.log(
+                            "\nNote: On AMD APU+dGPU systems, set GPU_DEVICE_ORDINAL=0 to prevent "
+                            "cross-device memory faults. This is configured automatically at launch.",
+                            "info",
+                        )
+
+                    self.update_progress(1.0)
+                    self.update_progress_text("OpenCL patches applied!")
+                    self.log("\n✓ OpenCL GPU acceleration patches applied successfully!", "success")
+                    self.log(
+                        "OpenCL filters (blur, sharpen, denoise, etc.) should now use your GPU.",
+                        "info",
+                    )
+
+                    QTimer.singleShot(
+                        0,
+                        lambda: QMessageBox.information(
+                            self,
+                            "OpenCL Patches Applied",
+                            "OpenCL GPU acceleration patches have been applied successfully!\n\n"
+                            "GPU-accelerated filters should now work correctly.\n"
+                            "The libraster.dll patch will need to be re-applied after Affinity updates.",
+                        ),
+                    )
+
+                except Exception as e:
+                    self.log(f"Error applying OpenCL patches: {e}", "error")
+                    import traceback
+                    self.log(traceback.format_exc(), "error")
+                finally:
+                    self.end_operation()
+
+            threading.Thread(target=apply_opencl_thread, daemon=True).start()
+
+        except Exception as e:
+            self.log(f"Error: {e}", "error")
+
+    # =========================================================================
+    # Canva OAuth Login Patches
+    # =========================================================================
+
+    def ensure_ssa_fix_files(self, silent=False):
+        """Ensure SharedStorageAccessManagerFix patcher files are available"""
+        try:
+            dest_dir = Path(self.directory) / "Patch" / "SharedStorageAccessManagerFix"
+            dest_dir.mkdir(parents=True, exist_ok=True)
+
+            files_to_get = {
+                "SharedStorageAccessManagerFix.cs": "https://raw.githubusercontent.com/ryzendew/Linux-Affinity-Installer/main/Patch/SharedStorageAccessManagerFix/SharedStorageAccessManagerFix.cs",
+                "SharedStorageAccessManagerFix.csproj": "https://raw.githubusercontent.com/ryzendew/Linux-Affinity-Installer/main/Patch/SharedStorageAccessManagerFix/SharedStorageAccessManagerFix.csproj",
+                "AffinitySendURL.cs": "https://raw.githubusercontent.com/ryzendew/Linux-Affinity-Installer/main/Patch/SharedStorageAccessManagerFix/AffinitySendURL.cs",
+            }
+
+            script_dir = Path(__file__).parent
+            source_dir = script_dir.parent / "Patch" / "SharedStorageAccessManagerFix"
+
+            for filename, github_url in files_to_get.items():
+                dest_file = dest_dir / filename
+                if dest_file.exists() and dest_file.stat().st_size > 0:
+                    continue
+
+                source_file = source_dir / filename
+                if source_file.exists():
+                    try:
+                        shutil.copy2(source_file, dest_file)
+                        if not silent:
+                            self.log(f"Copied {filename} to Patch/SharedStorageAccessManagerFix/", "info")
+                        continue
+                    except Exception:
+                        pass
+
+                if not dest_file.exists():
+                    if not silent:
+                        self.log(f"Downloading {filename} from GitHub...", "info")
+                    try:
+                        if self.download_file(github_url, str(dest_file), filename):
+                            if not silent:
+                                self.log(f"Downloaded {filename}", "success")
+                        else:
+                            if not silent:
+                                self.log(f"Failed to download {filename}", "error")
+                            return False
+                    except Exception as e:
+                        if not silent:
+                            self.log(f"Error downloading {filename}: {e}", "error")
+                        return False
+
+            return True
+        except Exception as e:
+            if not silent:
+                self.log(f"Error ensuring SSA fix files: {e}", "error")
+            return False
+
+    def build_ssa_fix(self):
+        """Build the SharedStorageAccessManagerFix .NET project"""
+        patch_dir = Path(self.directory) / "Patch" / "SharedStorageAccessManagerFix"
+        csproj = patch_dir / "SharedStorageAccessManagerFix.csproj"
+
+        if not csproj.exists():
+            self.log(f"SharedStorageAccessManagerFix.csproj not found: {csproj}", "error")
+            return None
+
+        self.log(f"Building SharedStorageAccessManagerFix from: {patch_dir}", "info")
+
+        output_dir = patch_dir / "bin" / "Release"
+        success, stdout, stderr = self.run_command(
+            [
+                "dotnet",
+                "build",
+                str(csproj.resolve()),
+                "-c",
+                "Release",
+                "-o",
+                str(output_dir.resolve()),
+                "--no-incremental",
+                "-p:BuildProjectReferences=false",
+                "/p:DisableImplicitNuGetFallbackFolder=true",
+            ],
+            check=False,
+            capture=True,
+        )
+
+        if not success:
+            self.log(f"Failed to build SharedStorageAccessManagerFix: {stderr}", "error")
+            return None
+
+        for name in ["SharedStorageAccessManagerFix", "SharedStorageAccessManagerFix.dll"]:
+            candidate = output_dir / name
+            if candidate.exists():
+                self.log("SharedStorageAccessManagerFix built successfully", "success")
+                return candidate
+
+        self.log("Built SSA fix not found at expected location", "error")
+        return None
+
+    def run_ssa_fix(self, dll_path=None):
+        """Run the SharedStorageAccessManagerFix on Serif.Affinity.dll"""
+        if dll_path is None:
+            dll_path = str(
+                Path(self.directory)
+                / "drive_c"
+                / "Program Files"
+                / "Affinity"
+                / "Affinity"
+                / "Serif.Affinity.dll"
+            )
+
+        if not Path(dll_path).exists():
+            self.log(f"Serif.Affinity.dll not found: {dll_path}", "warning")
+            return False
+
+        patcher_exe = self.build_ssa_fix()
+        if not patcher_exe:
+            self.log("Failed to build SharedStorageAccessManagerFix", "error")
+            return False
+
+        self.log(f"Running SharedStorageAccessManagerFix on: {dll_path}", "info")
+
+        if patcher_exe.suffix == ".dll":
+            cmd = ["dotnet", str(patcher_exe), dll_path]
+        else:
+            cmd = [str(patcher_exe), dll_path]
+
+        success, stdout, stderr = self.run_command(cmd, check=False, capture=True)
+
+        if stdout:
+            for line in stdout.strip().split("\n"):
+                if line.strip():
+                    self.log(line.strip(), "success" if "patched" in line.lower() or "already" in line.lower() else "info")
+
+        if success:
+            self.log("SharedStorageAccessManager fix applied", "success")
+            return True
+        else:
+            self.log(f"SharedStorageAccessManager fix failed: {stderr}", "error")
+            return False
+
+    def setup_tls_relay(self):
+        """Run the TLS relay one-time setup (hosts entry, socat capability, cert)"""
+        script_dir = Path(__file__).parent
+        relay_script = script_dir / "AffinityTLSRelay.sh"
+
+        if not relay_script.exists():
+            self.log("AffinityTLSRelay.sh not found", "error")
+            return False
+
+        # Check dependencies
+        if not self.check_command("socat"):
+            self.log("socat is not installed. Installing...", "info")
+            install_cmd = None
+            if self.distro in ["arch", "cachyos", "endeavouros", "xerolinux"]:
+                install_cmd = ["sudo", "pacman", "-S", "--needed", "--noconfirm", "socat", "bind-tools"]
+            elif self.distro in ["fedora", "nobara"]:
+                install_cmd = ["sudo", "dnf", "install", "-y", "socat", "bind-utils"]
+            elif self.distro in ["pikaos", "pop", "debian"]:
+                install_cmd = ["sudo", "apt", "install", "-y", "socat", "dnsutils"]
+
+            if install_cmd:
+                success, _, stderr = self.run_command(install_cmd, check=False, capture=True)
+                if not success:
+                    self.log(f"Failed to install socat: {stderr}", "error")
+                    return False
+                self.log("socat installed", "success")
+
+        self.log("[INFO] TLS Relay One-Time Setup", "info")
+
+        # --- /etc/hosts entry ---
+        hosts_ok = False
+        try:
+            with open("/etc/hosts", "r") as f:
+                if any("affinity.api.serifservices.com" in line and line.strip().startswith("127.0.0.1")
+                       for line in f):
+                    self.log("[✓] /etc/hosts entry already present", "success")
+                    hosts_ok = True
+        except OSError:
+            pass
+
+        if not hosts_ok:
+            self.log("[INFO] Adding /etc/hosts entry (requires authentication)...", "info")
+            # Use pkexec for graphical auth prompt, fall back to sudo
+            priv_cmd = "pkexec" if self.check_command("pkexec") else "sudo"
+            success, _, stderr = self.run_command(
+                ["bash", "-c", f'echo "127.0.0.1 affinity.api.serifservices.com" | {priv_cmd} tee -a /etc/hosts >/dev/null'],
+                check=False, capture=True,
+            )
+            if success:
+                self.log("[✓] /etc/hosts entry added", "success")
+                hosts_ok = True
+            else:
+                self.log("[ERROR] Failed to add /etc/hosts entry", "error")
+
+        # --- socat port-binding capability ---
+        socat_ok = False
+        socat_path = shutil.which("socat")
+        if socat_path:
+            # Resolve symlinks — setcap can't operate on symlinks
+            socat_path = str(Path(socat_path).resolve())
+            cap_check, cap_out, _ = self.run_command(
+                ["getcap", socat_path], check=False, capture=True,
+            )
+            if cap_out and "cap_net_bind_service" in cap_out:
+                self.log("[✓] socat already has port-binding capability", "success")
+                socat_ok = True
+            else:
+                self.log("[INFO] Granting socat port-binding capability (requires authentication)...", "info")
+                priv_cmd = "pkexec" if self.check_command("pkexec") else "sudo"
+                success, _, stderr = self.run_command(
+                    [priv_cmd, "setcap", "cap_net_bind_service=+ep", socat_path],
+                    check=False, capture=True,
+                )
+                if success:
+                    self.log("[✓] socat capability granted", "success")
+                    socat_ok = True
+                else:
+                    self.log("[ERROR] Failed to set socat capability", "error")
+
+        # --- Generate TLS certificate ---
+        relay_dir = Path(self.directory) / "tls-relay"
+        server_pem = relay_dir / "server.pem"
+        if server_pem.exists():
+            self.log("[✓] TLS certificate already exists", "success")
+        else:
+            self.log("[INFO] Generating self-signed certificate...", "info")
+            relay_dir.mkdir(parents=True, exist_ok=True)
+            success, _, stderr = self.run_command(
+                ["bash", "-c",
+                 f'(umask 077 && openssl req -x509 -newkey rsa:2048 '
+                 f'-keyout "{relay_dir}/key.pem" -out "{relay_dir}/cert.pem" '
+                 f'-days 3650 -nodes -subj "/CN=affinity.api.serifservices.com" 2>/dev/null) && '
+                 f'cat "{relay_dir}/cert.pem" "{relay_dir}/key.pem" > "{server_pem}" && '
+                 f'chmod 600 "{server_pem}" && '
+                 f'rm -f "{relay_dir}/key.pem" "{relay_dir}/cert.pem"'],
+                check=False, capture=True,
+            )
+            if success:
+                self.log("[✓] Certificate generated", "success")
+            else:
+                self.log(f"[ERROR] Certificate generation failed: {stderr}", "error")
+
+        if not hosts_ok or not socat_ok:
+            self.log("⚠ TLS relay setup failed (Canva login may not work)", "warning")
+            return False
+
+        self.log("[✓] TLS relay setup complete", "success")
+        return True
+
+    def start_tls_relay(self):
+        """Start the TLS relay (called before launching Affinity)"""
+        script_dir = Path(__file__).parent
+        relay_script = script_dir / "AffinityTLSRelay.sh"
+
+        if not relay_script.exists():
+            return False
+
+        env = os.environ.copy()
+        env["WINEPREFIX"] = self.directory
+
+        success, _, _ = self.run_command(
+            ["bash", str(relay_script), "start"],
+            check=False,
+            capture=True,
+            env=env,
+        )
+        return success
+
+    def setup_canva_login(self):
+        """Set up everything needed for Canva OAuth login (UI button handler)"""
+        try:
+            self.log(
+                "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            )
+            self.log("Enable Canva Login", "info")
+            self.log(
+                "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            )
+
+            # Check Wine
+            wine = self.get_wine_path("wine")
+            if not wine.exists():
+                self.show_message(
+                    "Wine Not Found",
+                    "Wine must be installed before enabling Canva login.\n\n"
+                    "Please run 'One-Click Setup' or 'Setup Wine Environment' first.",
+                    "warning",
+                )
+                return
+
+            # Check .NET SDK
+            if not self.check_dotnet_sdk():
+                self.log(".NET SDK not found. Attempting to install...", "info")
+                if not self.install_dotnet_sdk():
+                    self.log("Failed to install .NET SDK", "error")
+                    self.show_message(
+                        ".NET SDK Required",
+                        ".NET SDK 8.0+ is required for the Canva login patch.\n\n"
+                        "Please install it manually, then try again.",
+                        "warning",
+                    )
+                    return
+
+            self.start_operation("Enable Canva Login")
+
+            def canva_login_thread():
+                try:
+                    self.update_progress(0.0)
+                    self.update_progress_text("Downloading patch files...")
+
+                    # Step 1: Ensure patch files
+                    if not self.ensure_ssa_fix_files():
+                        self.log("Failed to obtain patch files", "error")
+                        self.end_operation()
+                        return
+                    self.update_progress(0.2)
+
+                    # Step 2: Build and run SharedStorageAccessManagerFix
+                    self.update_progress_text("Patching Serif.Affinity.dll...")
+                    if not self.run_ssa_fix():
+                        self.log("SharedStorageAccessManager fix failed", "error")
+                        self.end_operation()
+                        return
+                    self.update_progress(0.5)
+
+                    # Step 3: Set up TLS relay
+                    self.update_progress_text("Setting up TLS relay...")
+                    if not self.setup_tls_relay():
+                        self.log("TLS relay setup failed (Canva login may not work)", "warning")
+                    self.update_progress(0.8)
+
+                    # Step 4: Install AffinitySendURL.exe
+                    self.update_progress_text("Installing OAuth callback tool...")
+                    script_dir = Path(__file__).parent
+                    sendurl_src = script_dir / "AffinitySendURL.exe"
+                    tools_dir = Path(self.directory) / "tools"
+                    sendurl_dest = tools_dir / "AffinitySendURL.exe"
+                    if sendurl_src.exists():
+                        tools_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(str(sendurl_src), str(sendurl_dest))
+                        self.log(f"[✓] AffinitySendURL.exe installed to {sendurl_dest}", "success")
+                    elif sendurl_dest.exists():
+                        self.log("[✓] AffinitySendURL.exe already installed", "success")
+                    else:
+                        self.log("AffinitySendURL.exe not found — OAuth callback will not work", "warning")
+                        self.log("Compile from Patch/SharedStorageAccessManagerFix/AffinitySendURL.cs", "info")
+                    self.update_progress(0.85)
+
+                    # Step 5: Install URL handler and register mime type
+                    self.update_progress_text("Registering URL handler...")
+                    url_handler_script = script_dir / "AffinityURLHandler.sh"
+                    desktop_template = script_dir / "affinity-url-handler.desktop"
+                    desktop_dest = Path.home() / ".local" / "share" / "applications" / "affinity-url-handler.desktop"
+
+                    if url_handler_script.exists():
+                        # Make the URL handler script executable
+                        url_handler_script.chmod(0o755)
+
+                        if desktop_template.exists():
+                            # Read template and replace placeholder with actual path
+                            desktop_content = desktop_template.read_text()
+                            desktop_content = desktop_content.replace(
+                                "PLACEHOLDER_SCRIPT_PATH", str(url_handler_script)
+                            )
+                            # Ensure destination directory exists
+                            desktop_dest.parent.mkdir(parents=True, exist_ok=True)
+                            desktop_dest.write_text(desktop_content)
+                            self.log(f"[✓] URL handler desktop file installed", "success")
+                        else:
+                            # Create desktop file directly if template is missing
+                            desktop_dest.parent.mkdir(parents=True, exist_ok=True)
+                            desktop_dest.write_text(
+                                "[Desktop Entry]\n"
+                                "Type=Application\n"
+                                "Name=Affinity URL Handler\n"
+                                "Comment=Handles affinity:// OAuth callback URLs for Canva sign-in\n"
+                                f"Exec={url_handler_script} %u\n"
+                                "MimeType=x-scheme-handler/affinity;\n"
+                                "NoDisplay=true\n"
+                            )
+                            self.log(f"[✓] URL handler desktop file created", "success")
+
+                        # Register as affinity:// protocol handler
+                        self.run_command(
+                            ["xdg-mime", "default", "affinity-url-handler.desktop",
+                             "x-scheme-handler/affinity"],
+                            check=False, capture=True,
+                        )
+                        self.log("[✓] Registered as affinity:// protocol handler", "success")
+                    else:
+                        self.log("AffinityURLHandler.sh not found — URL handler not registered", "warning")
+                        self.log("See docs/CANVA-OAUTH-LOGIN.md for manual setup.", "info")
+
+                    self.update_progress(1.0)
+                    self.update_progress_text("Canva login setup complete!")
+                    self.log("\n✓ Canva login patches applied!", "success")
+
+                    QTimer.singleShot(
+                        0,
+                        lambda: QMessageBox.information(
+                            self,
+                            "Canva Login Enabled",
+                            "Canva login has been fully configured!\n\n"
+                            "• IL patch applied to Serif.Affinity.dll\n"
+                            "• TLS relay configured (starts with Affinity)\n"
+                            "• OAuth URL handler registered\n\n"
+                            "The IL patch will need to be re-applied after Affinity updates.",
+                        ),
+                    )
+
+                except Exception as e:
+                    self.log(f"Error setting up Canva login: {e}", "error")
+                    import traceback
+                    self.log(traceback.format_exc(), "error")
+                finally:
+                    self.end_operation()
+
+            threading.Thread(target=canva_login_thread, daemon=True).start()
+
+        except Exception as e:
+            self.log(f"Error: {e}", "error")
+
     def launch_affinity_v3(self):
         """Launch Affinity v3 with optimized environment variables"""
         self.log(
@@ -16859,7 +17570,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.show_message(
                 "Affinity Not Found",
                 "Affinity v3 is not installed.\n\nPlease install it first using:\n'Update Affinity Applications' → 'Affinity (Unified)'",
-                QMessageBox.Icon.Warning,
+                "warning",
             )
             return
 
@@ -16871,7 +17582,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.show_message(
                 "Wine Not Found",
                 "Wine is not set up.\n\nPlease run 'Setup Wine Environment' first.",
-                QMessageBox.Icon.Warning,
+                "warning",
             )
             return
 
@@ -16892,7 +17603,18 @@ Would you like to continue with {distro_name} anyway?"""
         env["WINE"] = str(wine_bin)
         env["WINEPREFIX"] = self.directory
         env["WINEDEBUG"] = "-all,fixme-all"
-        env["WINEDLLOVERRIDES"] = "opencl="
+        # Check if patched opencl.dll is installed; if not, keep OpenCL disabled
+        # to avoid Wine's broken stubs causing "Unsupported Graphics Card" errors
+        orig_opencl = wine_dir / "lib" / "wine" / "x86_64-windows" / "opencl.dll.orig" if wine_dir else None
+        if orig_opencl and orig_opencl.exists():
+            # Patched opencl.dll is installed (backup exists from patching)
+            env["WINEDLLOVERRIDES"] = "d3d9=b"
+            env["PersonaIsOpenCLCPUBackendEnabled"] = "1"
+            if self.has_amd_gpu():
+                env["GPU_DEVICE_ORDINAL"] = "0"
+        else:
+            # No OpenCL patch — keep upstream behavior (OpenCL disabled)
+            env["WINEDLLOVERRIDES"] = "opencl=;d3d9=b"
 
         # Add GPU selection environment variables if configured
         gpu_env = self.get_gpu_env_vars()
@@ -16982,36 +17704,40 @@ Would you like to continue with {distro_name} anyway?"""
         self.log(f"WINEPREFIX: {self.directory}", "info")
         self.log(f"Affinity: {affinity_exe}", "info")
 
-        # Launch Affinity using wine start
-        self.log("\nLaunching Affinity v3...", "info")
+        # Launch in background thread to avoid freezing UI
+        def _launch_thread():
+            try:
+                # Start TLS relay for Canva login (lightweight, no build step)
+                self.start_tls_relay()
 
-        # Use wine start to launch the application
-        wine_start_cmd = [
-            str(wine_bin),
-            "start",
-            "C:/Program Files/Affinity/Affinity/Affinity.exe",
-        ]
+                # Launch Affinity using wine start
+                self.log("\nLaunching Affinity v3...", "info")
+                wine_start_cmd = [
+                    str(wine_bin),
+                    "start",
+                    "C:/Program Files/Affinity/Affinity/Affinity.exe",
+                ]
 
-        try:
-            # Launch in background (non-blocking)
-            process = subprocess.Popen(
-                wine_start_cmd,
-                env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True,
-            )
+                process = subprocess.Popen(
+                    wine_start_cmd,
+                    env=env,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
 
-            self.log("✓ Affinity v3 launched successfully", "success")
-            self.log("The application should open in a moment...", "info")
+                self.log("✓ Affinity v3 launched successfully", "success")
+                self.log("The application should open in a moment...", "info")
 
-        except Exception as e:
-            self.log(f"✗ Failed to launch Affinity v3: {e}", "error")
-            self.show_message(
-                "Launch Failed",
-                f"Failed to launch Affinity v3:\n\n{str(e)}",
-                QMessageBox.Icon.Critical,
-            )
+            except Exception as e:
+                self.log(f"✗ Failed to launch Affinity v3: {e}", "error")
+                self.show_message(
+                    "Launch Failed",
+                    f"Failed to launch Affinity v3:\n\n{str(e)}",
+                    "error",
+                )
+
+        threading.Thread(target=_launch_thread, daemon=True).start()
 
     def download_affinity_installer(self):
         """Download the Affinity installer by itself"""

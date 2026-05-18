@@ -1,0 +1,116 @@
+--- pe_wrappers.c.upstream	2026-05-17 23:48:48.799043399 -0400
++++ pe_wrappers.c	2026-05-17 23:48:40.845960851 -0400
+@@ -25,6 +25,13 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(opencl);
+ 
++/* Forward declarations for OpenCL functions defined in pe_thunks.c */
++cl_int WINAPI clWaitForEvents( cl_uint num_events, const cl_event *event_list );
++cl_int WINAPI clGetEventInfo( cl_event event, cl_event_info param_name,
++                              size_t param_value_size, void *param_value, size_t *param_value_size_ret );
++cl_int WINAPI clRetainEvent( cl_event event );
++cl_int WINAPI clReleaseEvent( cl_event event );
++
+ static cl_int filter_extensions( const char *unix_exts, SIZE_T size, char *win_exts, size_t *ret_size )
+ {
+     char *p = win_exts;
+@@ -277,6 +284,99 @@
+ }
+ 
+ 
++/* --- clSetEventCallback implementation ---
++ *
++ * Wine's Unix-side OpenCL wrapper has no callback bridging infrastructure.
++ * We implement clSetEventCallback entirely on the PE (Windows) side:
++ * for each registered callback, spawn a thread that waits for the event
++ * to reach the requested state, then invokes the Windows callback.
++ * CL_COMPLETE uses clWaitForEvents (efficient blocking wait).
++ * CL_RUNNING and CL_SUBMITTED poll clGetEventInfo with Sleep(1).
++ * This avoids all Unix↔Windows ABI and thread-initialization issues.
++ */
++
++struct event_callback_data
++{
++    cl_event event;
++    cl_int command_exec_callback_type;
++    void (WINAPI *pfn_notify)(cl_event event, cl_int event_command_status, void *user_data);
++    void *user_data;
++};
++
++static DWORD WINAPI event_callback_thread( void *arg )
++{
++    struct event_callback_data *data = arg;
++    cl_int status;
++
++    if (data->command_exec_callback_type == CL_COMPLETE)
++    {
++        clWaitForEvents( 1, &data->event );
++        clGetEventInfo( data->event, CL_EVENT_COMMAND_EXECUTION_STATUS,
++                        sizeof(status), &status, NULL );
++    }
++    else
++    {
++        /* Poll for intermediate states (CL_SUBMITTED, CL_RUNNING).
++         * Status values are ordered QUEUED(3) > SUBMITTED(2) > RUNNING(1) > COMPLETE(0),
++         * with negative values indicating errors. The callback fires when the
++         * status reaches or passes the target, i.e. status <= callback_type. */
++        for (;;)
++        {
++            clGetEventInfo( data->event, CL_EVENT_COMMAND_EXECUTION_STATUS,
++                            sizeof(status), &status, NULL );
++            if (status <= data->command_exec_callback_type)
++                break;
++            Sleep( 1 );
++        }
++    }
++
++    data->pfn_notify( data->event, status, data->user_data );
++
++    clReleaseEvent( data->event );
++    free( data );
++    return 0;
++}
++
++cl_int WINAPI clSetEventCallback( cl_event event, cl_int command_exec_callback_type,
++        void (WINAPI *pfn_notify)(cl_event event, cl_int event_command_status, void *user_data),
++        void *user_data )
++{
++    struct event_callback_data *data;
++    HANDLE thread;
++
++    TRACE( "(%p, %d, %p, %p)\n", event, command_exec_callback_type, pfn_notify, user_data );
++
++    if (!event) return CL_INVALID_EVENT;
++    if (!pfn_notify) return CL_INVALID_VALUE;
++    if (command_exec_callback_type != CL_COMPLETE &&
++        command_exec_callback_type != CL_RUNNING &&
++        command_exec_callback_type != CL_SUBMITTED)
++        return CL_INVALID_VALUE;
++
++    data = malloc( sizeof(*data) );
++    if (!data) return CL_OUT_OF_HOST_MEMORY;
++
++    data->event = event;
++    data->command_exec_callback_type = command_exec_callback_type;
++    data->pfn_notify = pfn_notify;
++    data->user_data = user_data;
++
++    /* Retain the event so it stays alive until our thread fires. */
++    clRetainEvent( event );
++
++    thread = CreateThread( NULL, 0, event_callback_thread, data, 0, NULL );
++    if (!thread)
++    {
++        ERR( "CreateThread failed\n" );
++        clReleaseEvent( event );
++        free( data );
++        return CL_OUT_OF_HOST_MEMORY;
++    }
++    CloseHandle( thread );
++
++    return CL_SUCCESS;
++}
++
+ BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )
+ {
+     if (reason == DLL_PROCESS_ATTACH)

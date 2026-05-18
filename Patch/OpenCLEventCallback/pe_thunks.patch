@@ -1,0 +1,16 @@
+--- pe_thunks.c.upstream	2026-05-17 23:48:49.332048931 -0400
++++ pe_thunks.c	2026-05-17 23:49:10.938273163 -0400
+@@ -579,12 +579,7 @@
+     return OPENCL_CALL( clRetainSampler, &params );
+ }
+ 
+-cl_int WINAPI clSetEventCallback( cl_event event, cl_int command_exec_callback_type, void (WINAPI* pfn_notify)(cl_event event, cl_int event_command_status, void *user_data), void* user_data )
+-{
+-    struct clSetEventCallback_params params = { event, command_exec_callback_type, pfn_notify, user_data };
+-    TRACE( "(%p, %d, %p, %p)\n", event, command_exec_callback_type, pfn_notify, user_data );
+-    return OPENCL_CALL( clSetEventCallback, &params );
+-}
++/* clSetEventCallback is implemented in pe_wrappers.c */
+ 
+ cl_int WINAPI clSetKernelArg( cl_kernel kernel, cl_uint arg_index, size_t arg_size, const void* arg_value )
+ {

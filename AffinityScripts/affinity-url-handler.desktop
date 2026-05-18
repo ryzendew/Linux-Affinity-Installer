@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Affinity URL Handler
+Comment=Handles affinity:// OAuth callback URLs for Canva sign-in
+Exec=PLACEHOLDER_SCRIPT_PATH %u
+MimeType=x-scheme-handler/affinity;
+NoDisplay=true
