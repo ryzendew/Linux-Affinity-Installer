@@ -95,6 +95,11 @@ This document lists known issues and their workarounds. For the latest updates, 
 
 ## Application Features
 
+### Copied Images or Files Cannot Be Pasted on Wayland
+**Issue:** Plain text pastes into Affinity, but copied image pixels (`image/png`) or files (`text/uri-list`) do not. This affects Wine using `winex11.drv` through Xwayland.
+
+**Workaround:** Install the bounded, binary-safe clipboard bridge described in the [Wayland Clipboard Guide](WAYLAND-CLIPBOARD.md). It mirrors only the missing image/file formats. Read the documented multi-format selection trade-off before enabling it.
+
 ### Microsoft Edge WebView2 Runtime Not Working
 **Issue:** The Microsoft Edge WebView2 Runtime is broken and does not work properly in Wine. This affects features in Affinity v3 that rely on WebView2, such as the Help system and some web-based dialogs.
 

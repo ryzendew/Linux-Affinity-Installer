@@ -1,0 +1,15 @@
+[Unit]
+Description=Binary-safe Wayland to X11 clipboard bridge for Affinity/Wine
+Documentation=https://github.com/ryzendew/Linux-Affinity-Installer/blob/main/docs/WAYLAND-CLIPBOARD.md
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/.local/bin/affinity-clipboard-bridge.py
+Restart=on-failure
+RestartPreventExitStatus=2
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

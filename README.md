@@ -79,6 +79,7 @@ sudo apt install python3-pyqt6.qtsvg
 - **[Wine Versions](docs/WINE-VERSIONS.md)** - Available Wine versions and recommendations
 - **[Hardware Acceleration](docs/HARDWARE-ACCELERATION.md)** - GPU acceleration options (vkd3d-proton, DXVK, OpenCL)
 - **[OpenCL Guide](docs/OpenCL-Guide.md)** - Detailed OpenCL configuration
+- **[Wayland Clipboard](docs/WAYLAND-CLIPBOARD.md)** - Paste copied images and files into Wine/Affinity
 - **[Legacy Scripts](docs/LEGACY-SCRIPTS.md)** - Command-line installation scripts
 
 ### Additional Resources
