@@ -669,6 +669,7 @@ class AffinityInstallerGUI(QMainWindow):
                 ("dotnet35sp1", ".NET Framework 3.5 SP1"),
                 ("dotnet48", ".NET Framework 4.8"),
                 ("corefonts", "Windows Core Fonts"),
+                ("allfonts", "Segoe UI Fonts (allfonts)"),
                 ("vcrun2022", "Visual C++ Redistributables 2022"),
                 ("msxml3", "MSXML 3.0"),
                 ("msxml6", "MSXML 6.0"),
@@ -709,8 +710,7 @@ class AffinityInstallerGUI(QMainWindow):
             if button is None:
                 continue
 
-            is_installed = app_status.get(app_name, False)
-            enabled = wine_exists and is_installed
+            enabled = wine_exists
 
             button.setEnabled(enabled)
             if enabled:
@@ -5656,6 +5656,7 @@ class AffinityInstallerGUI(QMainWindow):
         """Execute command and stream output to log in real-time, cancellable.
         Also stores the full streamed text in self._last_stream_output_text for post-run heuristics."""
         self._last_stream_output_text = ""
+        self._last_stream_returncode = None
         try:
             if isinstance(command, str):
                 command = command.split()
@@ -5752,6 +5753,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             process.wait()
             self._last_stream_output_text = "".join(buffer)
+            self._last_stream_returncode = process.returncode
             return process.returncode == 0
         except Exception as e:
             self.log(f"Error running command: {e}", "error")
@@ -5825,6 +5827,47 @@ class AffinityInstallerGUI(QMainWindow):
             pass
         return False
 
+    def _affinity_app_paths(self, display_name):
+        """Return (dir_name, exe_name) for the Affinity app referenced by display_name.
+        Falls back to the unified app when the name is unrecognized."""
+        name = (display_name or "").lower()
+        if "photo" in name:
+            return ("Photo 2", "Photo.exe")
+        if "designer" in name:
+            return ("Designer 2", "Designer.exe")
+        if "publisher" in name:
+            return ("Publisher 2", "Publisher.exe")
+        # Unified / Affinity v3 / Suite
+        return ("Affinity", "Affinity.exe")
+
+    def verify_affinity_artifacts(self, display_name):
+        """Verify the real Affinity payload was laid down after an installer run.
+        Returns True only when the app executable (or Serif.Affinity.dll for the
+        unified app) actually exists on disk. Logs which artifacts were checked."""
+        dir_name, exe_name = self._affinity_app_paths(display_name)
+        app_dir = (
+            Path(self.directory)
+            / "drive_c"
+            / "Program Files"
+            / "Affinity"
+            / dir_name
+        )
+        candidates = [app_dir / exe_name]
+        # The unified app also ships Serif.Affinity.dll; accept either.
+        name = (display_name or "").lower()
+        if "photo" not in name and "designer" not in name and "publisher" not in name:
+            candidates.append(app_dir / "Serif.Affinity.dll")
+
+        for artifact in candidates:
+            if artifact.exists():
+                self.log(f"Verified install artifact present: {artifact}", "success")
+                return True
+
+        self.log("Installation verification failed. Expected at least one of:", "error")
+        for artifact in candidates:
+            self.log(f"  missing: {artifact}", "error")
+        return False
+
     def _run_installer_and_capture(
         self, installer_file: Path, env: dict, label: str = "installer"
     ):
@@ -5847,26 +5890,34 @@ class AffinityInstallerGUI(QMainWindow):
         )
         is_webview2 = "webview" in installer_name or "edge" in installer_name
 
+        # Select Wine binary for this installer
+        if is_affinity_v3 or is_affinity_v2:
+            wine = self.get_wine_tkg_for_installer("wine")
+            winecfg = self.get_wine_tkg_for_installer("winecfg")
+            self.log(f"Using Wine for Affinity installation: {wine}", "info")
+        elif is_webview2:
+            wine = self.get_wine_tkg_for_installer("wine")
+            winecfg = self.get_wine_tkg_for_installer("winecfg")
+            self.log(f"Using Wine for WebView2 installation: {wine}", "info")
+        else:
+            wine = str(self.get_wine_path("wine"))
+            winecfg = str(self.get_wine_path("winecfg"))
+
+        # Ensure selected Wine directory is first in PATH for wineserver/wineboot helpers
+        try:
+            wine_parent = str(Path(wine).parent)
+            current_path = env.get("PATH", "")
+            env["PATH"] = f"{wine_parent}:{current_path}"
+        except Exception:
+            pass
+
         # Set Windows 11 before installing Affinity
         if is_affinity_v3 or is_affinity_v2:
             self.log(
                 "Setting Windows version to 11 before Affinity installation...", "info"
             )
-            # Use system winecfg for Affinity installers (they use system wine)
-            self.run_command(["winecfg", "-v", "win11"], check=False, env=env)
+            self.run_command([winecfg, "-v", "win11"], check=False, env=env)
             self.log("✓ Windows version set to 11", "success")
-
-        # Use system Wine for Affinity installations (custom Wine doesn't work for installation)
-        if is_affinity_v3 or is_affinity_v2:
-            wine = "wine"  # Use system Wine for installation
-            self.log("Using system Wine for Affinity installation", "info")
-        elif is_webview2:
-            # Use system wine for WebView2
-            wine = "wine"
-            self.log("Using system Wine for WebView2 installation", "info")
-        else:
-            # Use custom Wine for other installers
-            wine = str(self.get_wine_path("wine"))
 
         # For Affinity installers, try direct execution first (more reliable)
         if is_affinity_v3 or is_affinity_v2:
@@ -5886,6 +5937,25 @@ class AffinityInstallerGUI(QMainWindow):
                 t0 = time.time()
                 ok = self.run_command_streaming(cmd, env=env)
                 dt = time.time() - t0
+
+                rc = getattr(self, "_last_stream_returncode", None)
+                self.log(
+                    f"{label.capitalize()} attempt {idx} exit code={rc}, elapsed={dt:.2f}s",
+                    "info",
+                )
+                # For Affinity installers, dump full installer output to help
+                # diagnose crashes (e.g. .NET 0xe0434352 in SetupUI.exe).
+                if is_affinity_v3 or is_affinity_v2:
+                    full_out = (self._last_stream_output_text or "").strip()
+                    if full_out:
+                        self.log(
+                            f"--- Full {label} output (attempt {idx}) ---", "info"
+                        )
+                        for out_line in full_out.splitlines():
+                            self.log(f"  {out_line}", "info")
+                        self.log(
+                            f"--- End {label} output (attempt {idx}) ---", "info"
+                        )
 
                 # For Affinity installers, check if installer is actually running despite exceptions
                 if is_affinity_v3 or is_affinity_v2:
@@ -7398,7 +7468,8 @@ class AffinityInstallerGUI(QMainWindow):
 
                                 # Extract app path
                                 quoted_path_match = re.search(
-                                    r'wine\s+"([^"]+)"', exec_content
+                                    r'wine\s+(?:start\s+/unix\s+)?"([^"]+)"',
+                                    exec_content,
                                 )
                                 if quoted_path_match:
                                     app_path = quoted_path_match.group(1)
@@ -7412,8 +7483,7 @@ class AffinityInstallerGUI(QMainWindow):
                                     )
 
                                 # Get wine path
-                                wine = self.get_wine_path("wine")
-                                wine_path = str(wine)
+                                wine_path = self.get_wine_tkg_for_installer("wine")
 
                                 # Get GPU environment variables (but NOT DXVK)
                                 gpu_env = self.get_gpu_env_vars()
@@ -7423,12 +7493,9 @@ class AffinityInstallerGUI(QMainWindow):
                                 exec_line = f"Exec=env WINEPREFIX={directory_str}"
                                 if gpu_env:
                                     exec_line += f" {gpu_env.strip()}"
-                                exec_line += f" {wine_path}"
+                                exec_line += f" {wine_path} start /unix"
                                 if app_path:
-                                    if " " in app_path or not app_path.startswith("/"):
-                                        exec_line += f' "{app_path}"'
-                                    else:
-                                        exec_line += f" {app_path}"
+                                    exec_line += f' "{app_path}"'
 
                                 new_lines.append(exec_line + "\n")
                                 exec_updated = True
@@ -7650,7 +7717,8 @@ class AffinityInstallerGUI(QMainWindow):
 
                                 # Extract app path
                                 quoted_path_match = re.search(
-                                    r'wine\s+"([^"]+)"', exec_content
+                                    r'wine\s+(?:start\s+/unix\s+)?"([^"]+)"',
+                                    exec_content,
                                 )
                                 if quoted_path_match:
                                     app_path = quoted_path_match.group(1)
@@ -7664,8 +7732,7 @@ class AffinityInstallerGUI(QMainWindow):
                                     )
 
                                 # Get wine path
-                                wine = self.get_wine_path("wine")
-                                wine_path = str(wine)
+                                wine_path = self.get_wine_tkg_for_installer("wine")
 
                                 # Get GPU and DXVK environment variables
                                 gpu_env = self.get_gpu_env_vars()
@@ -7678,12 +7745,9 @@ class AffinityInstallerGUI(QMainWindow):
                                     exec_line += f" {gpu_env.strip()}"
                                 if dxvk_env:
                                     exec_line += f" {dxvk_env.strip()}"
-                                exec_line += f" {wine_path}"
+                                exec_line += f" {wine_path} start /unix"
                                 if app_path:
-                                    if " " in app_path or not app_path.startswith("/"):
-                                        exec_line += f' "{app_path}"'
-                                    else:
-                                        exec_line += f" {app_path}"
+                                    exec_line += f' "{app_path}"'
 
                                 new_lines.append(exec_line + "\n")
                                 exec_updated = True
@@ -7771,8 +7835,9 @@ class AffinityInstallerGUI(QMainWindow):
                         exec_content = line[5:].strip()  # Remove "Exec=" prefix
 
                         # Use regex to extract the app path (everything after wine, typically in quotes or ending with .exe)
-                        # Pattern 1: Find app path in quotes after wine
-                        quoted_path_match = re.search(r'wine\s+"([^"]+)"', exec_content)
+                        quoted_path_match = re.search(
+                            r'wine\s+(?:start\s+/unix\s+)?"([^"]+)"', exec_content
+                        )
                         if quoted_path_match:
                             app_path = quoted_path_match.group(1)
                         else:
@@ -7786,8 +7851,7 @@ class AffinityInstallerGUI(QMainWindow):
                             )
 
                         # Get wine path (standard location)
-                        wine = self.get_wine_path("wine")
-                        wine_path = str(wine)
+                        wine_path = self.get_wine_tkg_for_installer("wine")
 
                         # Rebuild Exec line with new GPU env vars
                         exec_line = f"Exec=env WINEPREFIX={directory_str}"
@@ -7795,13 +7859,9 @@ class AffinityInstallerGUI(QMainWindow):
                             exec_line += f" {gpu_env.strip()}"
                         if dxvk_env:
                             exec_line += f" {dxvk_env.strip()}"
-                        exec_line += f" {wine_path}"
+                        exec_line += f" {wine_path} start /unix"
                         if app_path:
-                            # Quote the app path if it contains spaces or special characters
-                            if " " in app_path or not app_path.startswith("/"):
-                                exec_line += f' "{app_path}"'
-                            else:
-                                exec_line += f" {app_path}"
+                            exec_line += f' "{app_path}"'
                         else:
                             # If we couldn't parse app_path, log a warning but still update GPU env
                             self.log(
@@ -11193,16 +11253,119 @@ class AffinityInstallerGUI(QMainWindow):
         # Set up DLL overrides
         self.setup_d3d12_overrides()
 
+    def _find_vkd3d_dll_sources(self):
+        """Locate extracted vkd3d-proton DLLs on disk, returning a mapping of
+        {"x64": dir, "x86": dir} for whichever architectures were found.
+
+        The archive layout is <root>/x64/*.dll and <root>/x86/*.dll, but older
+        installs staged a flat copy of only the 64-bit DLLs into vkd3d_dlls/ and
+        into the Wine tree, so several locations are checked."""
+        dll_names = ("d3d12.dll", "d3d12core.dll")
+        sources = {}
+
+        cache_dir = Path(self.directory) / "dxvk"
+        candidate_roots = []
+        if cache_dir.exists():
+            candidate_roots.extend(sorted(cache_dir.glob("vkd3d-proton-*")))
+        candidate_roots.extend(sorted(Path(self.directory).glob("vkd3d-proton-*")))
+
+        for root in candidate_roots:
+            if not root.is_dir():
+                continue
+            for arch in ("x64", "x86"):
+                if arch in sources:
+                    continue
+                arch_dir = root / arch
+                if all((arch_dir / dll).exists() for dll in dll_names):
+                    sources[arch] = arch_dir
+
+        if "x64" not in sources:
+            for fallback in (
+                Path(self.directory) / "vkd3d_dlls",
+                self.get_wine_dir()
+                / "lib"
+                / "wine"
+                / "vkd3d-proton"
+                / "x86_64-windows",
+            ):
+                if all((fallback / dll).exists() for dll in dll_names):
+                    sources["x64"] = fallback
+                    break
+
+        return sources
+
+    def install_vkd3d_dlls_to_prefix(self):
+        """Copy the real vkd3d-proton d3d12/d3d12core DLLs into the Wine prefix's
+        system32 (64-bit) and syswow64 (32-bit) directories.
+
+        This is required because the d3d12/d3d12core DLL overrides are set to
+        "native" with no builtin fallback. Wine resolves "native" by loading the
+        DLL from the prefix's system directories, so if only Wine's own builtin
+        d3d12 is present there the load is refused and Wine reports
+        "Library d3d12.dll ... not found". That single failure cascades through
+        libdxcore -> libraster -> librenderer/libStory/libpsd/libpersona, and the
+        Affinity process then hangs instead of starting. Staging the DLLs into the
+        Wine installation tree alone is not sufficient."""
+        sources = self._find_vkd3d_dll_sources()
+        if not sources:
+            self.log(
+                "Warning: could not locate extracted vkd3d-proton DLLs to install into the prefix",
+                "warning",
+            )
+            return False
+
+        targets = {
+            "x64": Path(self.directory) / "drive_c" / "windows" / "system32",
+            "x86": Path(self.directory) / "drive_c" / "windows" / "syswow64",
+        }
+
+        installed = 0
+        for arch, target_dir in targets.items():
+            source_dir = sources.get(arch)
+            if not source_dir or not target_dir.exists():
+                continue
+            for dll in ("d3d12.dll", "d3d12core.dll"):
+                src = source_dir / dll
+                if not src.exists():
+                    continue
+                dest = target_dir / dll
+                try:
+                    backup = dest.with_suffix(dest.suffix + ".wine-builtin.bak")
+                    if dest.exists() and not backup.exists():
+                        shutil.copy2(dest, backup)
+                    shutil.copy2(src, dest)
+                    installed += 1
+                except Exception as e:
+                    self.log(
+                        f"Warning: could not install {dll} into {target_dir.name}: {e}",
+                        "warning",
+                    )
+
+        if installed:
+            self.log(
+                f"Installed {installed} vkd3d-proton DLL(s) into the Wine prefix",
+                "success",
+            )
+            return True
+
+        self.log(
+            "Warning: no vkd3d-proton DLLs were installed into the Wine prefix",
+            "warning",
+        )
+        return False
+
     def setup_d3d12_overrides(self):
         """Set up DLL overrides for d3d12.dll and d3d12core.dll"""
         self.log("Setting up DLL overrides for d3d12...", "info")
+
+        self.install_vkd3d_dlls_to_prefix()
 
         reg_file = Path(self.directory) / "dll_overrides.reg"
         with open(reg_file, "w") as f:
             f.write("REGEDIT4\n")
             f.write("[HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides]\n")
-            f.write('"d3d12"="native"\n')
-            f.write('"d3d12core"="native"\n')
+            f.write('"d3d12"="native,builtin"\n')
+            f.write('"d3d12core"="native,builtin"\n')
 
         regedit = self.get_wine_path("regedit")
         env = os.environ.copy()
@@ -11456,6 +11619,15 @@ class AffinityInstallerGUI(QMainWindow):
                         self.log(f"Copied {dll}", "success")
                         break
 
+            cache_dir = Path(self.directory) / "dxvk"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cached_vkd3d_dir = cache_dir / f"vkd3d-proton-{vkd3d_version}"
+            if not cached_vkd3d_dir.exists():
+                try:
+                    shutil.copytree(vkd3d_dir, cached_vkd3d_dir)
+                except Exception as e:
+                    self.log(f"Warning: could not cache vkd3d-proton: {e}", "warning")
+
             shutil.rmtree(vkd3d_dir)
 
             # Store installed version
@@ -11514,6 +11686,14 @@ class AffinityInstallerGUI(QMainWindow):
             "renderer=vulkan",
             "crypt32",
         ]
+        if not self.has_segoe_ui_fonts():
+            components.append("allfonts")
+            self.log(
+                "Segoe UI fonts not found in prefix, adding allfonts installation",
+                "warning",
+            )
+        else:
+            self.log("Segoe UI fonts already present, skipping allfonts", "success")
 
         self.log(
             "Installing Wine components (this may take several minutes)...", "info"
@@ -12398,6 +12578,14 @@ Would you like to continue with {distro_name} anyway?"""
                 ("tahoma", "Tahoma Font"),
                 ("renderer=vulkan", "Vulkan Renderer"),
             ]
+            if not self.has_segoe_ui_fonts():
+                components.append(("allfonts", "Segoe UI Fonts (allfonts)"))
+                self.log(
+                    "Segoe UI fonts not found in prefix, adding allfonts installation",
+                    "warning",
+                )
+            else:
+                self.log("Segoe UI fonts already present, skipping allfonts", "success")
         except Exception as e:
             self.log(
                 f"Error in winetricks dependencies installation: {str(e)}", "error"
@@ -12972,6 +13160,21 @@ Would you like to continue with {distro_name} anyway?"""
             return None
         return None
 
+    def has_segoe_ui_fonts(self):
+        """Check whether the prefix has Segoe UI fonts required by WPF installers."""
+        fonts_dir = Path(self.directory) / "drive_c" / "windows" / "Fonts"
+        if not fonts_dir.exists():
+            return False
+
+        segoe_candidates = [
+            "segoeui.ttf",
+            "segoeuib.ttf",
+            "segoeuii.ttf",
+            "segoeuiz.ttf",
+            "seguili.ttf",
+        ]
+        return any((fonts_dir / font).exists() for font in segoe_candidates)
+
     def _check_winetricks_component(self, component, wine, env):
         """Check if a winetricks component is installed"""
         try:
@@ -13003,6 +13206,8 @@ Would you like to continue with {distro_name} anyway?"""
                     for font in core_fonts:
                         if (fonts_dir / font).exists():
                             return True
+            elif component == "allfonts":
+                return self.has_segoe_ui_fonts()
             elif component == "vcrun2022":
                 # Check for Visual C++ 2022 redistributables
                 vcrun_paths = [
@@ -13064,10 +13269,9 @@ Would you like to continue with {distro_name} anyway?"""
 
         return False
 
-    def check_webview2_installed(self):
-        """Check if WebView2 Runtime is already installed (fast check - file paths only)"""
-        # Fast check: only check file paths, skip slow registry query
-        webview2_paths = [
+    def _find_webview2_executable(self):
+        """Find msedgewebview2.exe in standard WebView2 install locations."""
+        webview2_roots = [
             Path(self.directory)
             / "drive_c"
             / "Program Files (x86)"
@@ -13082,19 +13286,26 @@ Would you like to continue with {distro_name} anyway?"""
             / "Application",
         ]
 
-        for webview2_path in webview2_paths:
-            if webview2_path.exists():
-                # Check if msedgewebview2.exe exists
-                msedgewebview2_exe = webview2_path / "msedgewebview2.exe"
-                if msedgewebview2_exe.exists():
-                    return True
+        for root in webview2_roots:
+            if not root.exists():
+                continue
 
-        # If file check fails, do a registry check (only if file check failed)
-        # Skip registry check to make it faster - file check is usually sufficient
-        # Registry check can be slow and may hang, so we skip it for speed
-        return False
+            direct_exe = root / "msedgewebview2.exe"
+            if direct_exe.exists():
+                return direct_exe
 
-        return False
+            for version_dir in sorted(root.iterdir(), reverse=True):
+                if not version_dir.is_dir():
+                    continue
+                candidate = version_dir / "msedgewebview2.exe"
+                if candidate.exists():
+                    return candidate
+
+        return None
+
+    def check_webview2_installed(self):
+        """Check if WebView2 Runtime is already installed."""
+        return self._find_webview2_executable() is not None
 
     def install_webview2_runtime(self):
         """Install Microsoft Edge WebView2 Runtime for Affinity v3 (Unified)"""
@@ -13165,30 +13376,10 @@ Would you like to continue with {distro_name} anyway?"""
         self.log("Checking if WebView2 Runtime is already installed...", "info")
         webview2_installed = False
 
-        # Check for WebView2 installation directory
-        webview2_paths = [
-            Path(self.directory)
-            / "drive_c"
-            / "Program Files (x86)"
-            / "Microsoft"
-            / "EdgeWebView"
-            / "Application",
-            Path(self.directory)
-            / "drive_c"
-            / "Program Files"
-            / "Microsoft"
-            / "EdgeWebView"
-            / "Application",
-        ]
-
-        for webview2_path in webview2_paths:
-            if webview2_path.exists():
-                # Check if msedgewebview2.exe exists
-                msedgewebview2_exe = webview2_path / "msedgewebview2.exe"
-                if msedgewebview2_exe.exists():
-                    webview2_installed = True
-                    self.log(f"WebView2 Runtime found at: {webview2_path}", "success")
-                    break
+        webview2_exe = self._find_webview2_executable()
+        if webview2_exe:
+            webview2_installed = True
+            self.log(f"WebView2 Runtime found at: {webview2_exe}", "success")
 
         # Also check registry for WebView2 installation
         if not webview2_installed:
@@ -14016,10 +14207,7 @@ Would you like to continue with {distro_name} anyway?"""
 
         desktop_file = desktop_dir / f"{app_name.replace(' ', '')}.desktop"
 
-        wine = self.get_wine_path("wine")
-
-        # Normalize all paths to strings to avoid double slashes
-        wine_str = str(wine)
+        wine_str = self.get_wine_tkg_for_installer("wine")
         directory_str = str(self.directory).rstrip(
             "/"
         )  # Remove trailing slash if present
@@ -14050,7 +14238,7 @@ Would you like to continue with {distro_name} anyway?"""
                 exec_line += f" {gpu_env.strip()}"
             if dxvk_env:
                 exec_line += f" {dxvk_env.strip()}"
-            exec_line += f' {wine_str} "{exe_path_normalized}"'
+            exec_line += f' {wine_str} start /unix "{exe_path_normalized}"'
             f.write(f"{exec_line}\n")
             f.write("Terminal=false\n")
             f.write("Type=Application\n")
@@ -14175,13 +14363,37 @@ Would you like to continue with {distro_name} anyway?"""
                 installer_file.unlink()
                 self.log("Installer file removed", "success")
 
-            # Remove Wine desktop entries created by the installer
-            desktop_dir = Path.home() / ".local" / "share" / "applications"
-            wine_desktop_dir = desktop_dir / "wine" / "Programs"
+            if self.check_cancelled():
+                self.log("Update cancelled.", "warning")
+                return
 
             # Ensure display_name is a string
             if not isinstance(display_name, str):
                 display_name = str(display_name) if display_name is not None else ""
+
+            # Enforce artifact-based success: the updater frequently exits without
+            # laying down the real payload (e.g. SetupUI.exe crashing). Do not
+            # report success unless the app binaries are actually present.
+            if not self.verify_affinity_artifacts(display_name):
+                self.update_progress_text("Update failed")
+                self.log(
+                    f"✗ {display_name} update did NOT complete: application files are missing.",
+                    "error",
+                )
+                self.refresh_status_signal.emit()
+                self.show_message(
+                    "Update Failed",
+                    f"{display_name} was NOT installed.\n\n"
+                    "The installer ran but no application files were written to the "
+                    "Wine prefix. Check ~/AffinitySetup.log for the full installer "
+                    "output and any crash details.",
+                    "error",
+                )
+                return
+
+            # Remove Wine desktop entries created by the installer
+            desktop_dir = Path.home() / ".local" / "share" / "applications"
+            wine_desktop_dir = desktop_dir / "wine" / "Programs"
 
             # Map display names to possible Wine desktop entry names
             wine_entry_names = []
@@ -14406,6 +14618,38 @@ Would you like to continue with {distro_name} anyway?"""
                     "info",
                 )
 
+            if self.check_cancelled():
+                self.log("Installation cancelled.", "warning")
+                return
+
+            # Enforce artifact-based success before running any post-install steps
+            # or creating desktop entries. The installer can exit without writing
+            # the real payload (e.g. SetupUI.exe crashing), which previously still
+            # reported success and produced a launcher pointing at a missing exe.
+            display_name = {
+                "Add": "Affinity (Unified)",
+                "Photo": "Affinity Photo",
+                "Designer": "Affinity Designer",
+                "Publisher": "Affinity Publisher",
+            }.get(app_name, app_name)
+            if not self.verify_affinity_artifacts(display_name):
+                self.update_progress_text("Installation failed")
+                self.log(
+                    f"✗ {display_name} installation did NOT complete: application files are missing.",
+                    "error",
+                )
+                self.refresh_status_signal.emit()
+                self.show_message(
+                    "Installation Failed",
+                    f"{display_name} was NOT installed.\n\n"
+                    "The installer ran but no application files were written to the "
+                    "Wine prefix. No desktop entry was created. Check "
+                    "~/AffinitySetup.log for the full installer output and any crash "
+                    "details.",
+                    "error",
+                )
+                return
+
             # Restore WinMetadata (only needed for Wine 9.14 and 10.10, not 11.12+)
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
@@ -14487,12 +14731,6 @@ Would you like to continue with {distro_name} anyway?"""
 
             self.update_progress(1.0)
             self.update_progress_text("Installation complete!")
-            display_name = {
-                "Add": "Affinity (Unified)",
-                "Photo": "Affinity Photo",
-                "Designer": "Affinity Designer",
-                "Publisher": "Affinity Publisher",
-            }.get(app_name, app_name)
             self.log(f"\n✓ {display_name} installation completed!", "success")
             self.log("You can now launch it from your application menu.", "info")
 
@@ -16073,15 +16311,15 @@ Would you like to continue with {distro_name} anyway?"""
         if app_name == "Add":
             desktop_file = desktop_dir / "Affinity.desktop"
 
-        wine = self.get_wine_path("wine")
-        app_path = (
-            Path(self.directory)
-            / "drive_c"
-            / "Program Files"
-            / "Affinity"
-            / dir_name
-            / exe
+        wine = self.get_wine_tkg_for_installer("wine")
+        install_dir = (
+            Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / dir_name
         )
+        if app_name == "Add":
+            hook_exe = install_dir / "AffinityHook.exe"
+            if hook_exe.exists():
+                exe = "AffinityHook.exe"
+        app_path = install_dir / exe
         icon_path = Path.home() / ".local" / "share" / "icons" / icon
 
         # Normalize all paths to strings to avoid double slashes
@@ -16116,7 +16354,7 @@ Would you like to continue with {distro_name} anyway?"""
                 exec_line += f" {gpu_env.strip()}"
             if dxvk_env:
                 exec_line += f" {dxvk_env.strip()}"
-            exec_line += f' {wine_str} "{app_path_str}"'
+            exec_line += f' {wine_str} start /unix "{app_path_str}"'
             f.write(f"{exec_line}\n")
             f.write("Terminal=false\n")
             f.write("Type=Application\n")
@@ -17880,19 +18118,19 @@ Would you like to continue with {distro_name} anyway?"""
             self.show_message(
                 "Affinity Not Found",
                 "Affinity v3 is not installed.\n\nPlease install it first using:\n'Update Affinity Applications' → 'Affinity (Unified)'",
-                QMessageBox.Icon.Warning,
+                "warning",
             )
             return
 
         # Check if Wine is set up
-        wine_bin = self.get_wine_path("wine")
+        wine_bin = Path(self.get_wine_tkg_for_installer("wine"))
         if not wine_bin.exists():
             self.log("✗ Wine is not set up", "error")
             self.log("Please run 'Setup Wine Environment' first", "info")
             self.show_message(
                 "Wine Not Found",
                 "Wine is not set up.\n\nPlease run 'Setup Wine Environment' first.",
-                QMessageBox.Icon.Warning,
+                "warning",
             )
             return
 
@@ -17901,13 +18139,10 @@ Would you like to continue with {distro_name} anyway?"""
         # Prepare environment variables
         env = os.environ.copy()
 
-        # Set PATH to include Wine binaries (only for custom Wine builds)
-        wine_dir = self.get_wine_dir()
-        if wine_dir:
-            wine_dir_str = str(wine_dir)
-            current_path = env.get("PATH", "")
-            env["PATH"] = f"{wine_dir_str}/bin:{current_path}"
-        # For system Wine, it's already in PATH
+        # Ensure selected Wine directory is first in PATH for wineserver/wineboot helpers
+        wine_parent = str(wine_bin.parent)
+        current_path = env.get("PATH", "")
+        env["PATH"] = f"{wine_parent}:{current_path}"
 
         # Set Wine-related environment variables
         env["WINE"] = str(wine_bin)
@@ -18041,7 +18276,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.show_message(
                 "Launch Failed",
                 f"Failed to launch Affinity v3:\n\n{str(e)}",
-                QMessageBox.Icon.Critical,
+                "error",
             )
 
     def download_affinity_installer(self):
@@ -18107,7 +18342,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.show_message(
                 "Affinity Not Found",
                 f"Affinity install directory not found:\n{install_dir}\n\nPlease install Affinity first.",
-                QMessageBox.Icon.Warning,
+                "warning",
             )
             return
 
@@ -18266,7 +18501,7 @@ Would you like to continue with {distro_name} anyway?"""
                 "Installation Complete",
                 f"AffinityPluginLoader ({tag}) and WineFix have been installed successfully.\n\n"
                 "Affinity.desktop has been updated to launch via AffinityHook.exe.",
-                QMessageBox.Icon.Information,
+                "info",
             )
 
         except Exception as e:
@@ -18386,7 +18621,7 @@ Would you like to continue with {distro_name} anyway?"""
         exe_name = "AffinityHook.exe" if (prefer_hook and hook_exe.exists()) else "Affinity.exe"
         app_path_str = str(install_dir / exe_name).replace("\\", "/")
 
-        wine_str = str(self.get_wine_path("wine"))
+        wine_str = str(self.get_wine_tkg_for_installer("wine"))
         directory_str = str(self.directory).rstrip("/")
 
         # get_gpu_env_vars()/get_dxvk_env_vars() already return a trailing space
@@ -18400,6 +18635,8 @@ Would you like to continue with {distro_name} anyway?"""
         if dxvk_env:
             segments.append(dxvk_env)
         segments.append(wine_str)
+        segments.append("start")
+        segments.append("/unix")
         segments.append(f'"{app_path_str}"')
 
         return "Exec=" + " ".join(segments), exe_name
@@ -18478,7 +18715,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.show_message(
                 "Affinity Not Installed",
                 f"Could not find:\n{install_dir}\n\nPlease install Affinity first.",
-                QMessageBox.Icon.Warning,
+                "warning",
             )
             return
 
