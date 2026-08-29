@@ -411,9 +411,24 @@ print_header "OpenCL Support Setup"
 print_info "Installing vkd3d-proton for hardware acceleration and OpenCL support..."
 print_info "This enables GPU acceleration features in Affinity Publisher"
 
-print_step "Downloading vkd3d-proton v2.14.1 from GitHub..."
-vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v2.14.1/vkd3d-proton-2.14.1.tar.zst"
-if wget -q --show-progress "$vkd3d_url" -O "$directory/vkd3d-proton-2.14.1.tar.zst"; then
+# Fetch latest vkd3d-proton version from GitHub API (fallback: 3.0.1)
+vkd3d_version=""
+if command -v curl &> /dev/null; then
+    vkd3d_version=$(curl -sf "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest" \
+        | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+elif command -v wget &> /dev/null; then
+    vkd3d_version=$(wget -qO- "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest" \
+        | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+fi
+if [ -z "$vkd3d_version" ]; then
+    vkd3d_version="3.0.1"
+    print_warning "Could not fetch latest vkd3d-proton version. Using fallback: $vkd3d_version"
+fi
+vkd3d_archive="vkd3d-proton-${vkd3d_version}.tar.zst"
+vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v${vkd3d_version}/${vkd3d_archive}"
+
+print_step "Downloading vkd3d-proton v${vkd3d_version} from GitHub..."
+if wget -q --show-progress "$vkd3d_url" -O "$directory/$vkd3d_archive"; then
     print_success "vkd3d-proton downloaded successfully"
 else
     print_error "Failed to download vkd3d-proton"
@@ -423,7 +438,7 @@ fi
 print_step "Extracting vkd3d-proton archive..."
 extracted=false
 if command -v unzstd &> /dev/null; then
-    if unzstd -f "$directory/vkd3d-proton-2.14.1.tar.zst" -o "$directory/vkd3d-proton.tar" 2>/dev/null; then
+    if unzstd -f "$directory/$vkd3d_archive" -o "$directory/vkd3d-proton.tar" 2>/dev/null; then
         if tar -xf "$directory/vkd3d-proton.tar" -C "$directory" 2>/dev/null; then
             rm "$directory/vkd3d-proton.tar"
             extracted=true
@@ -431,7 +446,7 @@ if command -v unzstd &> /dev/null; then
         fi
     fi
 elif command -v zstd &> /dev/null && tar --help 2>&1 | grep -q "use-compress-program"; then
-    if tar --use-compress-program=zstd -xf "$directory/vkd3d-proton-2.14.1.tar.zst" -C "$directory" 2>/dev/null; then
+    if tar --use-compress-program=zstd -xf "$directory/$vkd3d_archive" -C "$directory" 2>/dev/null; then
         extracted=true
         print_success "vkd3d-proton extracted using zstd with tar"
     fi
@@ -440,10 +455,10 @@ fi
 if [ "$extracted" = false ]; then
     print_error "Cannot extract .tar.zst file. Please install zstd (e.g., sudo pacman -S zstd)"
     print_warning "Skipping vkd3d-proton installation. OpenCL will not work!"
-    rm -f "$directory/vkd3d-proton-2.14.1.tar.zst"
+    rm -f "$directory/$vkd3d_archive"
 fi
 
-rm -f "$directory/vkd3d-proton-2.14.1.tar.zst"
+rm -f "$directory/$vkd3d_archive"
 
 print_step "Installing vkd3d-proton DLLs to Wine library directory..."
 vkd3d_dir=$(find "$directory" -type d -name "vkd3d-proton-*" | head -1)
