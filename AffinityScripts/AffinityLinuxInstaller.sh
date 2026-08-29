@@ -84,6 +84,28 @@ print_progress() {
 # Utility Functions
 # ==========================================
 
+# Function to fetch the latest vkd3d-proton version from GitHub API
+# Falls back to a known-good version if the API is unreachable
+get_latest_vkd3d_version() {
+    local fallback="3.0.1"
+    local version
+
+    if command -v curl &> /dev/null; then
+        version=$(curl -sf "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest" \
+            | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+    elif command -v wget &> /dev/null; then
+        version=$(wget -qO- "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest" \
+            | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+    fi
+
+    if [ -z "$version" ]; then
+        print_warning "Could not fetch latest vkd3d-proton version from GitHub. Using fallback: $fallback"
+        echo "$fallback"
+    else
+        echo "$version"
+    fi
+}
+
 # Function to download files with progress bar
 download_file() {
     local url=$1
@@ -118,15 +140,335 @@ download_file() {
 detect_distro() {
     if [ -f /etc/os-release ]; then
         . /etc/os-release
+        RAW_DISTRO=$ID
         DISTRO=$(echo "$ID" | tr '[:upper:]' '[:lower:]')
         VERSION=$VERSION_ID
+        DISTRO_LIKE="${ID_LIKE:-}"
         # Normalize "pika" to "pikaos" if detected
         if [ "$DISTRO" = "pika" ]; then
             DISTRO="pikaos"
+        # Treat Ubuntu derivatives as Ubuntu for dependency and Wine setup.
+        elif [ "$DISTRO" != "ubuntu" ] && [ "$DISTRO" != "linuxmint" ] && [ "$DISTRO" != "zorin" ] && [ "$DISTRO" != "pop" ] && echo " ${DISTRO_LIKE} " | grep -q " ubuntu "; then
+            DISTRO="ubuntu"
         fi
     else
         print_error "Could not detect Linux distribution"
         exit 1
+    fi
+}
+
+is_ubuntu_based_distro() {
+    case $DISTRO in
+        "ubuntu"|"linuxmint"|"zorin"|"pop")
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+get_wine_runner_dir() {
+    echo "$HOME/.AffinityLinux/ElementalWarriorWine"
+}
+
+get_wine_binary() {
+    echo "$(get_wine_runner_dir)/bin/wine"
+}
+
+get_winecfg_binary() {
+    echo "$(get_wine_runner_dir)/bin/winecfg"
+}
+
+get_regedit_binary() {
+    echo "$(get_wine_runner_dir)/bin/regedit"
+}
+
+get_wineserver_binary() {
+    echo "$(get_wine_runner_dir)/bin/wineserver"
+}
+
+get_wine_vkd3d_dir() {
+    echo "$(get_wine_runner_dir)/lib/wine/vkd3d-proton/x86_64-windows"
+}
+
+minimum_supported_wine_version() {
+    echo "9.14"
+}
+
+preferred_ubuntu_wine_version() {
+    echo "10.20~noble-1"
+}
+
+preferred_ubuntu_wine_numeric_version() {
+    echo "10.20"
+}
+
+get_installed_wine_version() {
+    local version_output
+    local version
+
+    if ! command -v wine &> /dev/null; then
+        return 1
+    fi
+
+    version_output=$(wine --version 2>/dev/null || true)
+    version=$(echo "$version_output" | sed -E 's/.*wine-([0-9]+(\.[0-9]+)?).*/\1/')
+
+    if [ -z "$version" ] || [ "$version" = "$version_output" ]; then
+        return 1
+    fi
+
+    echo "$version"
+}
+
+is_supported_ubuntu_wine_version() {
+    local wine_version
+
+    if ! is_ubuntu_based_distro; then
+        return 0
+    fi
+
+    wine_version=$(get_installed_wine_version 2>/dev/null || true)
+    if [ -z "$wine_version" ]; then
+        return 1
+    fi
+
+    if ! dpkg --compare-versions "$wine_version" ge "$(minimum_supported_wine_version)"; then
+        return 1
+    fi
+
+    # Wine 11+ currently triggers winetricks hangs in Ubuntu Noble's new WoW64 mode.
+    if dpkg --compare-versions "$wine_version" ge "11.0"; then
+        return 1
+    fi
+
+    return 0
+}
+
+install_preferred_ubuntu_winehq_staging() {
+    local wine_version
+    local package_args=()
+
+    wine_version=$(preferred_ubuntu_wine_version)
+
+    if apt-cache madison winehq-staging 2>/dev/null | awk '{print $3}' | grep -Fxq "$wine_version"; then
+        print_info "Pinning Ubuntu-family WineHQ staging to $wine_version to avoid Wine 11 new WoW64 hangs in winetricks."
+        package_args=(
+            --allow-downgrades
+            "winehq-staging=$wine_version"
+            "wine-staging=$wine_version"
+            "wine-staging-amd64=$wine_version"
+            "wine-staging-i386:i386=$wine_version"
+        )
+    else
+        print_warning "Preferred WineHQ version $wine_version is unavailable for this Ubuntu release. Falling back to the latest WineHQ staging package."
+        package_args=("winehq-staging")
+    fi
+
+    sudo apt-get install --install-recommends -y "${package_args[@]}"
+}
+
+backup_incomplete_ubuntu_prefix() {
+    local directory="$HOME/.AffinityLinux"
+    local backup_dir
+
+    if ! is_ubuntu_based_distro; then
+        return 0
+    fi
+
+    if [ ! -f "$directory/system.reg" ]; then
+        return 0
+    fi
+
+    if [ -n "$(detect_installed_affinity 2>/dev/null)" ]; then
+        return 0
+    fi
+
+    backup_dir="${directory}.backup-$(date +%Y%m%d-%H%M%S)"
+    print_warning "Detected an existing Ubuntu Wine prefix without installed Affinity applications."
+    print_info "Backing it up to $backup_dir so a clean prefix can be recreated with the pinned Wine version."
+    wineserver -k 2>/dev/null || true
+    mv "$directory" "$backup_dir" || return 1
+    mkdir -p "$directory" || return 1
+    print_success "Incomplete Wine prefix backed up"
+}
+
+has_dotnet48_runtime() {
+    local directory="$HOME/.AffinityLinux"
+    local reg_file="$directory/system.reg"
+    local full_block
+
+    if [ ! -f "$reg_file" ]; then
+        return 1
+    fi
+
+    for key in \
+        '[Software\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full]' \
+        '[Software\\Wow6432Node\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full]'; do
+        full_block=$(awk -v key="$key" '
+            $0 == key { in_block=1; print; next }
+            in_block && /^\[/ { exit }
+            in_block { print }
+        ' "$reg_file")
+
+        if [ -n "$full_block" ] && printf '%s\n' "$full_block" | rg -q '"Install"=dword:00000001|"Release"=dword:' 2>/dev/null; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+get_winetricks_timeout_seconds() {
+    echo "${AFFINITY_WINETRICKS_TIMEOUT_SECONDS:-1800}"
+}
+
+terminate_prefix_wine_processes() {
+    local directory="$HOME/.AffinityLinux"
+
+    if [ -x "$(get_wineserver_binary)" ]; then
+        WINEPREFIX="$directory" "$(get_wineserver_binary)" -k >/dev/null 2>&1 || true
+    fi
+
+    wineserver -k >/dev/null 2>&1 || true
+    pkill -f "$directory" >/dev/null 2>&1 || true
+}
+
+run_winetricks_verb() {
+    local directory="$HOME/.AffinityLinux"
+    local description=$1
+    local verb=$2
+    local required=${3:-0}
+    local timeout_seconds=${4:-$(get_winetricks_timeout_seconds)}
+    local status
+
+    print_step "Installing $description..."
+    if command -v timeout >/dev/null 2>&1; then
+        env WINEPREFIX="$directory" timeout --signal=TERM --kill-after=30 "$timeout_seconds" \
+            winetricks --unattended --force --no-isolate --optout "$verb"
+        status=$?
+    else
+        WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout "$verb"
+        status=$?
+    fi
+
+    if [ "$status" -eq 0 ]; then
+        print_progress "$description installation attempted"
+        return 0
+    fi
+
+    if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+        print_error "$description installation timed out after ${timeout_seconds}s"
+        terminate_prefix_wine_processes
+    fi
+
+    if [ "$required" -eq 1 ]; then
+        print_error "Failed to install required runtime via winetricks: $verb"
+        return 1
+    fi
+
+    print_warning "$description installation failed; continuing"
+    return 0
+}
+
+verify_required_wine_runtimes() {
+    if has_dotnet48_runtime; then
+        return 0
+    fi
+
+    print_error ".NET Framework 4.8 is not installed in the Wine prefix."
+    print_info "Affinity's SetupUI.exe crashes without it, which causes the JIT debugger dialog you saw."
+    print_info "Current Ubuntu Wine builds are still exposing experimental new WoW64 behavior for this 64-bit prefix."
+    print_info "Aborting before launching the Affinity installer."
+    return 1
+}
+
+setup_system_wine_runner() {
+    local directory="$HOME/.AffinityLinux"
+    local runner_dir
+    runner_dir="$(get_wine_runner_dir)"
+    local runner_bin="$runner_dir/bin"
+    local wine_version
+
+    print_step "Configuring local Wine runner using system Wine..."
+    mkdir -p "$directory" "$runner_bin" "$(get_wine_vkd3d_dir)"
+
+    if is_ubuntu_based_distro && ! is_supported_ubuntu_wine_version; then
+        wine_version=$(get_installed_wine_version 2>/dev/null || echo "unknown")
+        print_error "Detected Wine $wine_version on this Ubuntu-family system."
+        print_info "Ubuntu-family systems currently support Wine versions from $(minimum_supported_wine_version) up to 10.x in this installer."
+        print_info "The installer will pin WineHQ staging to $(preferred_ubuntu_wine_numeric_version) to avoid Wine 11 new WoW64 hangs."
+        return 1
+    fi
+
+    for cmd in wine winecfg regedit wineserver; do
+        local system_cmd
+        system_cmd=$(command -v "$cmd" 2>/dev/null || true)
+        if [ -z "$system_cmd" ]; then
+            print_error "Required Wine command not found: $cmd"
+            print_info "Please ensure Wine is installed correctly and available in PATH."
+            return 1
+        fi
+        ln -sfn "$system_cmd" "$runner_bin/$cmd"
+    done
+
+    wine_version=$(get_installed_wine_version 2>/dev/null || echo "unknown")
+    print_success "System Wine runner configured at $runner_dir"
+    print_info "Using system Wine command: $(command -v wine) (version: $wine_version)"
+    return 0
+}
+
+install_ubuntu_based_dependencies() {
+    local codename="jammy"
+    local ubuntu_version="22.04"
+    local distro_label="${RAW_DISTRO:-$DISTRO}"
+    local winehq_install_failed=0
+
+    if [ -f /etc/os-release ]; then
+        codename=$(. /etc/os-release && echo "${UBUNTU_CODENAME:-${VERSION_CODENAME:-jammy}}")
+        ubuntu_version=$(. /etc/os-release && echo "${VERSION_ID:-22.04}")
+    fi
+
+    print_header "Ubuntu-Based Dependency Installation"
+    print_info "Detected Ubuntu-family system: $distro_label ($ubuntu_version / $codename)"
+
+    print_progress "Adding i386 architecture support..."
+    sudo dpkg --add-architecture i386 || return 1
+
+    print_info "Ubuntu-family systems need newer Wine than the stock distro package usually provides."
+    print_info "Installing WineHQ staging for improved Affinity compatibility"
+    sudo mkdir -pm755 /etc/apt/keyrings || return 1
+    wget -qO- https://dl.winehq.org/wine-builds/winehq.key | \
+        sudo gpg --dearmor -o /etc/apt/keyrings/winehq-archive.key || return 1
+    sudo rm -f /etc/apt/sources.list.d/winehq-*.sources 2>/dev/null || true
+    sudo wget -NP /etc/apt/sources.list.d/ \
+        "https://dl.winehq.org/wine-builds/ubuntu/dists/$codename/winehq-$codename.sources" || return 1
+    sudo apt-get update || return 1
+
+    if ! install_preferred_ubuntu_winehq_staging; then
+        winehq_install_failed=1
+        print_warning "Initial WineHQ staging install failed. Trying Noble t64 dependency transition workaround..."
+
+        if apt-cache show libpgm-5.3-0t64 >/dev/null 2>&1 && \
+           apt-cache show libieee1284-3t64 >/dev/null 2>&1; then
+            sudo apt-get install -y \
+                libpgm-5.3-0t64 \
+                libpgm-5.3-0t64:i386 \
+                libieee1284-3t64 \
+                libieee1284-3t64:i386 || return 1
+        fi
+
+        print_info "Retrying WineHQ staging after dependency transition..."
+        install_preferred_ubuntu_winehq_staging || return 1
+    fi
+
+    sudo apt-get install -y winetricks wget curl p7zip-full tar jq zstd unzip cabextract winbind || return 1
+
+    if [ "$winehq_install_failed" -eq 1 ]; then
+        print_success "Ubuntu-based dependencies installed using the Noble t64 workaround"
+    else
+        print_success "Ubuntu-based dependencies installed"
     fi
 }
 
@@ -136,7 +478,7 @@ check_dependencies() {
     
     # Check if this is an unsupported distribution
     case $DISTRO in
-        "ubuntu"|"linuxmint"|"zorin"|"bazzite")
+        "bazzite")
             print_header ""
             echo ""
             echo -e "${RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -162,7 +504,7 @@ check_dependencies() {
     
     local missing_deps=""
     
-    for dep in wine winetricks wget curl 7z tar jq; do
+    for dep in wine winetricks wget curl 7z tar jq unzip cabextract; do
         print_progress "Checking for $dep..."
         if ! command -v "$dep" &> /dev/null; then
             missing_deps+="$dep "
@@ -179,10 +521,31 @@ check_dependencies() {
     else
         print_success "zstd support is available"
     fi
+
+    if is_ubuntu_based_distro && ! command -v ntlm_auth &> /dev/null; then
+        missing_deps+="winbind "
+        print_error "ntlm_auth is not installed (package: winbind)"
+    fi
+
+    if is_ubuntu_based_distro && command -v wine &> /dev/null; then
+        local wine_version
+        wine_version=$(get_installed_wine_version 2>/dev/null || echo "")
+        if [ -z "$wine_version" ]; then
+            missing_deps+="winehq-staging "
+            print_error "Could not determine Wine version. WineHQ staging is required on Ubuntu-family systems."
+        elif ! is_supported_ubuntu_wine_version; then
+            missing_deps+="winehq-staging "
+            print_error "Wine $wine_version is outside the Ubuntu-supported range for this installer."
+            print_info "Ubuntu-family systems currently support Wine versions from $(minimum_supported_wine_version) up to 10.x here."
+            print_info "The installer will pin WineHQ staging to $(preferred_ubuntu_wine_numeric_version)."
+        else
+            print_success "Wine version $wine_version is supported"
+        fi
+    fi
     
     # For unsupported distributions, check if we can continue
     case $DISTRO in
-        "ubuntu"|"linuxmint"|"zorin"|"bazzite")
+        "bazzite")
             if [ -n "$missing_deps" ]; then
                 echo ""
                 echo -e "${RED}${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
@@ -193,7 +556,7 @@ check_dependencies() {
                 echo ""
                 echo -e "${YELLOW}${BOLD}This script will NOT automatically install dependencies for unsupported distributions.${NC}"
                 echo -e "${YELLOW}Please install the required dependencies manually:${NC}"
-                echo -e "${CYAN}  wine winetricks wget curl p7zip-full tar jq zstd${NC}"
+                echo -e "${CYAN}  winehq-staging winetricks wget curl p7zip-full tar jq zstd unzip cabextract winbind${NC}"
                 echo ""
                 while true; do
                     echo -e "${YELLOW}Press Enter to check dependencies again, or 'q' to exit:${NC}"
@@ -204,7 +567,7 @@ check_dependencies() {
                     fi
                     # Re-check dependencies
                     missing_deps=""
-                    for dep in wine winetricks wget curl tar jq; do
+                    for dep in wine winetricks wget curl tar jq unzip cabextract; do
                         if ! command -v "$dep" &> /dev/null; then
                             missing_deps+="$dep "
                         fi
@@ -216,6 +579,9 @@ check_dependencies() {
                     # Check for zstd
                     if ! command -v unzstd &> /dev/null && ! command -v zstd &> /dev/null; then
                         missing_deps+="zstd "
+                    fi
+                    if is_ubuntu_based_distro && command -v wine &> /dev/null && ! is_supported_ubuntu_wine_version; then
+                        missing_deps+="winehq-staging "
                     fi
                     if [ -z "$missing_deps" ]; then
                         print_success "All dependencies are now installed!"
@@ -316,7 +682,7 @@ install_dependencies() {
             fi
             
             print_step "Installing remaining dependencies..."
-            sudo apt install -y winetricks wget curl p7zip-full tar jq zstd
+            sudo apt install -y winetricks wget curl p7zip-full tar jq zstd winbind
             print_success "All dependencies installed for PikaOS"
             ;;
         "pop")
@@ -377,12 +743,18 @@ install_dependencies() {
             fi
             
             print_step "Installing remaining dependencies..."
-            sudo apt install -y winetricks wget curl p7zip-full tar jq zstd
+            sudo apt install -y winetricks wget curl p7zip-full tar jq zstd winbind
             print_success "All dependencies installed for Pop!_OS"
             ;;
-        "ubuntu"|"linuxmint"|"zorin"|"bazzite")
-            # This should never be reached if check_dependencies works correctly,
-            # but if it is, we'll show the warning and exit
+        "ubuntu"|"linuxmint"|"zorin")
+            if install_ubuntu_based_dependencies; then
+                print_success "All dependencies installed for Ubuntu-based system"
+            else
+                print_error "Failed to install Ubuntu-based dependencies"
+                exit 1
+            fi
+            ;;
+        "bazzite")
             print_error "Unsupported distribution detected in install_dependencies()"
             print_error "This function should not be called for unsupported distributions"
             exit 1
@@ -448,19 +820,20 @@ detect_and_select_gpu() {
         
         # Extract GPU info (everything after the third colon)
         gpu_info=$(echo "$line" | cut -d':' -f3-)
+        gpu_info_lower=$(echo "$gpu_info" | tr '[:upper:]' '[:lower:]')
         
         # Determine GPU type and add to arrays
-        if echo "$line" | grep -qi "nvidia"; then
+        if echo "$gpu_info_lower" | grep -Eq '(^|[^[:alpha:]])nvidia([^[:alpha:]]|$)'; then
             GPU_LIST+=("$gpu_info")
             GPU_TYPE+=("nvidia")
             GPU_ID+=("$bus_id")
             print_info "Found NVIDIA GPU: $gpu_info"
-        elif echo "$line" | grep -qi "amd\|radeon\|ati"; then
+        elif echo "$gpu_info_lower" | grep -Eq '(^|[^[:alpha:]])(amd|radeon|ati)([^[:alpha:]]|$)'; then
             GPU_LIST+=("$gpu_info")
             GPU_TYPE+=("amd")
             GPU_ID+=("$bus_id")
             print_info "Found AMD GPU: $gpu_info"
-        elif echo "$line" | grep -qi "intel"; then
+        elif echo "$gpu_info_lower" | grep -Eq '(^|[^[:alpha:]])intel([^[:alpha:]]|$)'; then
             GPU_LIST+=("$gpu_info")
             GPU_TYPE+=("intel")
             GPU_ID+=("$bus_id")
@@ -549,18 +922,24 @@ detect_and_select_gpu() {
         fi
         
         # Get user selection
+        # If not running in an interactive terminal, auto-select the recommended GPU
         local selection=""
-        while true; do
-            echo -n "Select GPU [1-$gpu_count]: "
-            read -r selection
-            
-            # Validate input
-            if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "$gpu_count" ]; then
-                break
-            else
-                print_error "Invalid selection. Please enter a number between 1 and $gpu_count."
-            fi
-        done
+        if [ -n "$recommended" ] && ! [ -t 0 ]; then
+            selection="$recommended"
+            print_info "Non-interactive mode: auto-selecting recommended GPU (Option $recommended)"
+        else
+            while true; do
+                echo -n "Select GPU [1-$gpu_count]: "
+                read -r selection
+
+                # Validate input
+                if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "$gpu_count" ]; then
+                    break
+                else
+                    print_error "Invalid selection. Please enter a number between 1 and $gpu_count."
+                fi
+            done
+        fi
         
         # Adjust for 0-based array indexing
         local selected_idx=$((selection - 1))
@@ -622,7 +1001,7 @@ detect_and_select_gpu() {
 verify_windows_version() {
     local directory="$HOME/.AffinityLinux"
     print_progress "Setting Windows compatibility mode to Windows 11..."
-    WINEPREFIX="$directory" "$directory/ElementalWarriorWine/bin/winecfg" -v win11 >/dev/null 2>&1 || true
+    WINEPREFIX="$directory" "$(get_winecfg_binary)" -v win11 >/dev/null 2>&1 || true
     print_success "Windows version configured"
     return 0
 }
@@ -630,7 +1009,7 @@ verify_windows_version() {
 # Function to download and setup Wine
 setup_wine() {
     print_header "Wine Binary Setup"
-    print_info "Downloading and configuring the custom Wine build (ElementalWarriorWine)..."
+    print_info "Preparing Wine runner..."
     
     local directory="$HOME/.AffinityLinux"
     local wine_url="https://github.com/seapear/AffinityOnLinux/releases/download/Legacy/ElementalWarriorWine-x86_64.tar.gz"
@@ -645,6 +1024,14 @@ setup_wine() {
     print_step "Creating installation directory: $directory"
     mkdir -p "$directory"
     print_success "Installation directory created"
+
+    if is_ubuntu_based_distro; then
+        print_info "Ubuntu-based system detected. Using system Wine instead of the legacy bundled Wine tarball."
+        backup_incomplete_ubuntu_prefix || exit 1
+        if ! setup_system_wine_runner; then
+            exit 1
+        fi
+    else
     
     # Download the specific Wine version
     print_step "Downloading Wine binary from GitHub releases..."
@@ -676,7 +1063,7 @@ setup_wine() {
     
     # Verify Wine binary exists
     print_step "Verifying Wine binary exists..."
-    if [ ! -f "$directory/ElementalWarriorWine/bin/wine" ]; then
+    if [ ! -f "$(get_wine_binary)" ]; then
         print_error "Wine binary not found at expected location"
         print_info "Checking directory structure..."
         echo "Contents of $directory:"
@@ -687,7 +1074,8 @@ setup_wine() {
         fi
         exit 1
     fi
-    print_success "Wine binary verified: $directory/ElementalWarriorWine/bin/wine"
+    print_success "Wine binary verified: $(get_wine_binary)"
+    fi
     
     # Create icons directory if it doesn't exist
     print_step "Setting up application icons..."
@@ -777,11 +1165,13 @@ setup_wine() {
     else
         print_info "Installing vkd3d-proton for hardware acceleration and OpenCL support..."
         print_info "This enables GPU acceleration features in Affinity applications"
-        
-        local vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v2.14.1/vkd3d-proton-2.14.1.tar.zst"
-        local vkd3d_filename="vkd3d-proton-2.14.1.tar.zst"
-        
-        print_step "Downloading vkd3d-proton v2.14.1 from GitHub..."
+
+        local vkd3d_version
+        vkd3d_version=$(get_latest_vkd3d_version)
+        local vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v${vkd3d_version}/vkd3d-proton-${vkd3d_version}.tar.zst"
+        local vkd3d_filename="vkd3d-proton-${vkd3d_version}.tar.zst"
+
+        print_step "Downloading vkd3d-proton v${vkd3d_version} from GitHub..."
     if download_file "$vkd3d_url" "$directory/$vkd3d_filename" "vkd3d-proton"; then
         print_success "vkd3d-proton downloaded successfully"
     else
@@ -810,7 +1200,7 @@ setup_wine() {
     if [ "$extracted" = false ]; then
         print_error "Cannot extract .tar.zst file. Please install zstd (e.g., sudo pacman -S zstd)"
         print_warning "Skipping vkd3d-proton installation. OpenCL will not work!"
-        rm -f "$directory/$vkd3d_filename"
+        rm -f "$directory/$vkd3d_filename" 2>/dev/null || true
     elif [ "$has_amd_gpu" = true ]; then
         # Skip vkd3d installation for AMD GPU, clean up if downloaded
         rm -f "$directory/$vkd3d_filename"
@@ -841,7 +1231,7 @@ setup_wine() {
             fi
             
             # Also install to Wine library directory
-            wine_lib_dir="$directory/ElementalWarriorWine/lib/wine/vkd3d-proton/x86_64-windows"
+            wine_lib_dir="$(get_wine_vkd3d_dir)"
             mkdir -p "$wine_lib_dir"
             if [ -f "$vkd3d_temp/d3d12.dll" ]; then
                 cp "$vkd3d_temp/d3d12.dll" "$wine_lib_dir/" 2>/dev/null || true
@@ -865,36 +1255,16 @@ setup_wine() {
     print_header "Wine Configuration"
     print_info "Installing required Windows libraries and configuring Wine..."
     
-    print_step "Installing .NET Framework 3.5..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout dotnet35 || true
-    print_progress ".NET 3.5 installation attempted"
-    
-    print_step "Installing .NET Framework 4.8..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout dotnet48 || true
-    print_progress ".NET 4.8 installation attempted"
-    
-    print_step "Installing Windows core fonts..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout corefonts || true
-    print_progress "Core fonts installation attempted"
-    
-    print_step "Installing Visual C++ Redistributables 2022..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout vcrun2022 || true
-    print_progress "VC++ 2022 installation attempted"
-    
-    print_step "Installing MSXML 3.0..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout msxml3 || true
-    print_progress "MSXML 3.0 installation attempted"
-    
-    print_step "Installing MSXML 6.0..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout msxml6 || true
-    print_progress "MSXML 6.0 installation attempted"
-    
-    print_step "Installing Tahoma font..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout tahoma || true
-    print_progress "Tahoma font installation attempted"
-    
-    print_step "Configuring Wine to use Vulkan renderer..."
-    WINEPREFIX="$directory" winetricks --unattended --force --no-isolate --optout renderer=vulkan || true
+    run_winetricks_verb ".NET Framework 3.5" "dotnet35" 0 || exit 1
+    run_winetricks_verb ".NET Framework 4.8" "dotnet48" 1 || exit 1
+    run_winetricks_verb "Windows core fonts" "corefonts" 0 || exit 1
+    run_winetricks_verb "Visual C++ Redistributables 2022" "vcrun2022" 0 || exit 1
+    run_winetricks_verb "MSXML 3.0" "msxml3" 0 || exit 1
+    run_winetricks_verb "MSXML 6.0" "msxml6" 0 || exit 1
+    run_winetricks_verb "Tahoma font" "tahoma" 0 || exit 1
+    run_winetricks_verb "Wine Vulkan renderer" "renderer=vulkan" 0 || exit 1
+
+    verify_required_wine_runtimes || exit 1
     print_success "Wine configured with Vulkan renderer"
     
     print_info "Note: The above installations may take several minutes. Errors are normal if components are already installed."
@@ -905,7 +1275,7 @@ setup_wine() {
     # Apply dark theme
     print_step "Applying Wine dark theme..."
     if download_file "https://raw.githubusercontent.com/seapear/AffinityOnLinux/refs/heads/main/Auxiliary/Other/wine-dark-theme.reg" "$directory/wine-dark-theme.reg" "dark theme"; then
-        WINEPREFIX="$directory" "$directory/ElementalWarriorWine/bin/regedit" "$directory/wine-dark-theme.reg" >/dev/null 2>&1 || true
+        WINEPREFIX="$directory" "$(get_regedit_binary)" "$directory/wine-dark-theme.reg" >/dev/null 2>&1 || true
         rm -f "$directory/wine-dark-theme.reg"
         print_success "Dark theme applied to Wine"
     else
@@ -925,7 +1295,8 @@ configure_opencl() {
     local app_dir=$1
     local app_name=$2
     local directory="$HOME/.AffinityLinux"
-    local wine_lib_dir="$directory/ElementalWarriorWine/lib/wine/vkd3d-proton/x86_64-windows"
+    local wine_lib_dir
+    wine_lib_dir="$(get_wine_vkd3d_dir)"
     local vkd3d_temp="$directory/vkd3d_dlls"
     
     if [ -d "$app_dir" ] && [ -d "$wine_lib_dir" ]; then
@@ -970,7 +1341,7 @@ configure_opencl() {
             echo "\"d3d12core\"=\"native\""
         } > "$reg_file"
         
-        if WINEPREFIX="$directory" "$directory/ElementalWarriorWine/bin/regedit" "$reg_file" >/dev/null 2>&1; then
+        if WINEPREFIX="$directory" "$(get_regedit_binary)" "$reg_file" >/dev/null 2>&1; then
             print_success "DLL overrides configured in Wine registry"
         else
             print_warning "Could not apply DLL overrides (OpenCL may not work)"
@@ -1019,7 +1390,7 @@ create_desktop_entry() {
     echo "Comment=A powerful $app_name software." >> "$desktop_file"
     echo "Icon=$icon_path" >> "$desktop_file"
     echo "Path=$directory" >> "$desktop_file"
-    echo "Exec=env WINEPREFIX=$directory ${dxvk_env}$directory/ElementalWarriorWine/bin/wine \"$app_path\"" >> "$desktop_file"
+    echo "Exec=env WINEPREFIX=$directory ${dxvk_env}$(get_wine_binary) \"$app_path\"" >> "$desktop_file"
     echo "Terminal=false" >> "$desktop_file"
     echo "NoDisplay=false" >> "$desktop_file"
     echo "StartupWMClass=${app_name,,}.exe" >> "$desktop_file"
@@ -1049,7 +1420,7 @@ create_all_in_one_desktop_entry() {
     echo "Comment=The unified Affinity application for photo editing, design, and publishing" >> "$desktop_file"
     echo "Icon=$icon_path" >> "$desktop_file"
     echo "Path=$directory" >> "$desktop_file"
-    echo "Exec=env WINEPREFIX=$directory ${dxvk_env}$directory/ElementalWarriorWine/bin/wine \"$directory/drive_c/Program Files/Affinity/Affinity/Affinity.exe\"" >> "$desktop_file"
+    echo "Exec=env WINEPREFIX=$directory ${dxvk_env}$(get_wine_binary) \"$directory/drive_c/Program Files/Affinity/Affinity/Affinity.exe\"" >> "$desktop_file"
     echo "Terminal=false" >> "$desktop_file"
     echo "NoDisplay=false" >> "$desktop_file"
     echo "Type=Application" >> "$desktop_file"
@@ -1286,7 +1657,7 @@ install_affinity() {
     echo ""
     
     # Run installer with debug messages suppressed
-    WINEPREFIX="$directory" WINEDEBUG=-all "$directory/ElementalWarriorWine/bin/wine" "$directory/$filename"
+    WINEPREFIX="$directory" WINEDEBUG=-all "$(get_wine_binary)" "$directory/$filename"
     
     # Wait for installer to fully complete and any Wine processes to finish
     print_step "Waiting for installer processes to complete..."
@@ -1428,7 +1799,7 @@ show_menu() {
 check_dependencies_quick() {
     local missing_deps=""
     
-    for dep in wine winetricks wget curl 7z tar jq; do
+    for dep in wine winetricks wget curl 7z tar jq unzip cabextract; do
         if ! command -v "$dep" &> /dev/null; then
             missing_deps+="$dep "
         fi
@@ -1437,6 +1808,14 @@ check_dependencies_quick() {
     # Check for zstd support
     if ! command -v unzstd &> /dev/null && ! command -v zstd &> /dev/null; then
         missing_deps+="zstd "
+    fi
+
+    if is_ubuntu_based_distro && ! command -v ntlm_auth &> /dev/null; then
+        missing_deps+="winbind "
+    fi
+
+    if is_ubuntu_based_distro && command -v wine &> /dev/null && ! is_supported_ubuntu_wine_version; then
+        missing_deps+="winehq-staging "
     fi
     
     if [ -n "$missing_deps" ]; then
@@ -1450,7 +1829,7 @@ check_dependencies_quick() {
 check_wine_setup() {
     local directory="$HOME/.AffinityLinux"
     
-    if [ -f "$directory/ElementalWarriorWine/bin/wine" ]; then
+    if [ -f "$(get_wine_binary)" ]; then
         return 0  # Wine is set up
     else
         return 1  # Wine is not set up

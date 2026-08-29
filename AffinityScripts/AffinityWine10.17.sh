@@ -624,9 +624,23 @@ install_opencl_support() {
     
     local prefix=$(get_wine_prefix)
     local work_dir="/tmp"
-    local vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v2.14.1/vkd3d-proton-2.14.1.tar.zst"
-    local vkd3d_archive="$work_dir/vkd3d-proton-2.14.1.tar.zst"
-    
+    # Fetch latest vkd3d-proton version from GitHub API (fallback: 3.0.1)
+    local vkd3d_version=""
+    if command -v curl &> /dev/null; then
+        vkd3d_version=$(curl -sf "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest" \
+            | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+    elif command -v wget &> /dev/null; then
+        vkd3d_version=$(wget -qO- "https://api.github.com/repos/HansKristian-Work/vkd3d-proton/releases/latest" \
+            | grep '"tag_name"' | sed -E 's/.*"v([^"]+)".*/\1/')
+    fi
+    if [ -z "$vkd3d_version" ]; then
+        vkd3d_version="3.0.1"
+        print_warning "Could not fetch latest vkd3d-proton version. Using fallback: $vkd3d_version"
+    fi
+
+    local vkd3d_url="https://github.com/HansKristian-Work/vkd3d-proton/releases/download/v${vkd3d_version}/vkd3d-proton-${vkd3d_version}.tar.zst"
+    local vkd3d_archive="$work_dir/vkd3d-proton-${vkd3d_version}.tar.zst"
+
     # Check if vkd3d-proton is already installed (check both possible locations)
     local wine_lib_dir_64="$prefix/lib64/wine/vkd3d-proton/x86_64-windows"
     local wine_lib_dir_32="$prefix/lib/wine/vkd3d-proton/x86_64-windows"
@@ -645,7 +659,7 @@ install_opencl_support() {
     if [ -d "$wine_lib_dir" ] && [ -f "$wine_lib_dir/d3d12.dll" ]; then
         print_success "vkd3d-proton appears to be already installed, skipping download"
     else
-        print_step "Downloading vkd3d-proton v2.14.1 from GitHub..."
+        print_step "Downloading vkd3d-proton v${vkd3d_version} from GitHub..."
         if download_file "$vkd3d_url" "$vkd3d_archive" "vkd3d-proton"; then
             print_success "vkd3d-proton downloaded successfully"
         else
