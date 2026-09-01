@@ -128,6 +128,30 @@ This document lists known issues and their workarounds. For the latest updates, 
 
 **Workaround:** The installer does not use Wine 10.17. Use Wine 10.10 (recommended) or 9.14 (legacy fallback). See [Wine Versions](WINE-VERSIONS.md) for details.
 
+### Publisher Crashes on Stock Wine (BadImageFormatException / StoreLicense Error)
+
+Issue: When setting up Affinity Publisher manually with a stock or staging build of Wine (rather than the ElementalWarrior fork this project's installer uses), Publisher shows its splash screen and then crashes. Depending on how far you got, the Wine log shows one of:
+
+```
+Unhandled Exception: System.BadImageFormatException: Format incorrect. (Exception from HRESULT: 0x8007000B)
+```
+
+or, after manually adding `wintypes.dll` and `Windows.winmd`:
+
+```
+Unhandled Exception: System.MissingMethodException: Method not found: 'Boolean Windows.Services.Store.StoreLicense.get_IsActive()'.
+```
+
+or:
+
+```
+Unhandled Exception: System.IO.FileNotFoundException: Could not load file or assembly 'Windows.Services.Store.StoreContract, ...'
+```
+
+Cause: stock Wine's `RoResolveNamespace` implementation (the built-in `wintypes` module, or the external `wintypes_shim.dll` some guides recommend) always resolves every WinRT namespace request to a single merged `Windows.winmd` file from the `windows-rs` project. That file doesn't fully implement `Windows.Services.Store`, which Publisher queries at startup for its store-license check. Photo and Designer don't hit this code path, so they can appear to work fine under stock Wine — which makes this limitation easy to miss until someone specifically tries Publisher.
+
+Note: this is why this project uses the ElementalWarrior Wine fork instead of stock Wine — it resolves WinRT namespaces against the full `WinMetadata` folder rather than a single merged file. Anyone trying to reproduce Publisher support with a plain/staging Wine build outside this installer will hit this wall regardless of installer file (`.exe` vs `.msix`), dependency install order, or DLL overrides.
+
 ## Feature Requests
 
 ### Affinity Pen Path Fix
