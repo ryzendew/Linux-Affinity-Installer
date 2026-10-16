@@ -1,5 +1,75 @@
 # Changelog
 
+## [2026-10-16] - Wine 11.19-r10, no architecture warning
+
+### Changed
+- **The 11.19 choice installs [`11.19-r10`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r10)**, pinned by SHA-256 like r9. Affinity's own installer no longer warns that installing is "not recommended" for this processor: it asks Windows' management service (WMI) for the processor type from its window, Wine gave it no answer, and it took that for an ARM machine. Four Wine fixes make that query answer; they also help other .NET programs that query WMI or use COM objects from their window.
+
+---
+
+## [2026-10-16] - Wine 11.19-r9, OpenGL
+
+### Changed
+- **The 11.19 choice installs [`11.19-r9`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r9)**, pinned by SHA-256 like r8. It fixes Affinity on Wine's OpenGL renderer (the "OpenGL" renderer choice, or a prefix without a renderer setting):
+  - **Tool flyouts and tooltips** were black boxes.
+  - **The floating Help panel** came back from a studio switch with an empty white frame.
+  
+  Nothing changes on the Vulkan renderer.
+
+### Fixed
+- **A second click no longer starts a second setup.** While an action runs, the other action buttons say so instead of starting another one beside it. Two One-Click Full Setups at once unpacked Wine over each other, one deleted the other's download, and the setup stopped with "Wine setup failed".
+- **Wine components after the fonts were missing their registry settings.** The direct font install created a second `C:\windows\Temp` folder (`Temp` beside Wine's `temp`), and winetricks' registry files were then not found: vcrun2022's and msxml's DLL overrides and the Vulkan renderer were never set. Affinity ran on Wine's own C++ runtime and crashed, and its setup could report .NET 3.5 missing. Fonts now use Wine's `temp`, and a stray `Temp` is folded back into it before the components are installed.
+- **A prefix that lost its renderer setting gets Vulkan back.** The installer checks for the setting after the Wine components and sets it again if it is missing, and the manager does the same for each of its prefixes while nothing runs in it (noted in the prefix's log). A renderer that was chosen, such as OpenGL, is kept.
+
+---
+
+## [2026-10-16] - Faster setup, WineFix wine-fixes-4
+
+### Changed
+- **The plugin loader and WineFix come from [`wine-fixes-4`](https://github.com/jfacemyer/AffinityPluginLoader/releases/tag/wine-fixes-4)**, pinned by SHA-256 like wine-fixes-3. New in it: the sub-tool panel (the shape tools, for example) keeps two columns after a studio switch, instead of coming back as one column running the height of the window.
+- **Faster setup:** the core fonts and Tahoma are copied and registered directly (about 6 s each, from 94 s and 16 s), and stopping Wine between steps no longer waits 20 s for a process that never leaves by itself.
+- **The WebView2 step no longer stalls:** its setup leaves Edge Update running, which held the step for up to an hour. Edge Update is stopped once the runtime is in place.
+- The progress line shows when the current operation started and how long it has taken, and the log records the total.
+- The installer's dialogs stay above its window.
+
+### Fixed
+- A fresh install could come up on Wine's OpenGL renderer instead of Vulkan: stopping Wine right after a setting was written could cut off Wine's registry save. Wine's server now always gets time to finish saving.
+
+---
+## [2026-10-15] - Wine 11.19-r8, Help works
+
+### Changed
+- **The 11.19 choice installs [`11.19-r8`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r8)**, pinned by SHA-256 like r7. It fixes:
+  - **Help:** the Help panel shows its pages on every opening, floating or docked, and they stay while you work in Affinity. Before, it was blank from the second opening, went blank whenever Affinity redrew its panels, and showed black boxes when the pointer moved over a page.
+  - **Updating Wine in an existing install** no longer shows "This application could not be started" two to four times.
+  - **Faster drawing of selections and node edits** (about 7% and 15% more frames), and less waiting in Affinity's thread pool.
+  - **Ctrl and Shift drops** from the file manager reach Affinity as such.
+- **Installing Affinity v3 also installs the WebView2 runtime**, so Help works without the separate button. If that install fails, the installer says so and points to the button.
+- .NET native images are compiled after the settings patch, not before: a fresh install could otherwise crash at the first start.
+- The OpenCL prompt describes the current state, and the checksum check in the log names the Wine release it verified.
+
+---
+
+## [2026-10-13] - Wine 11.19-r7
+
+### Changed
+- **The 11.19 choice installs [`11.19-r7`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r7)**, pinned by SHA-256 like r6. It fixes:
+  - **Dragging files from Wayland applications onto the canvas:** drops from Dolphin on Plasma were refused or canceled, and could crash Affinity with "Unrecoverable system error".
+  - **Copy and paste between documents:** the paste sometimes did nothing until a second copy. The clipboard briefly had no owner during a copy, and Klipper restored its previous entry.
+  - **Dropping a file on the toolbar:** after the drag had passed over the canvas, the file opened only once focus moved to another window.
+  - The OpenCL bridge work and wined3d fixes from the 11.18 set, sign-in metadata, and much faster reads in Affinity's PDF importer.
+
+---
+
+## [2026-10-13] - Pinned Wine builds, merged upstream
+
+### Changed
+- **The 11.19 and 11.18 choices install pinned builds**: 11.19 is [`11.19-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.19-r6) (adds pen pressure through WinTab and correct window coordinates across DPI awareness) and 11.18 is [`11.18-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.18-r1). Each download is checked against a SHA-256 in `AffinityLinuxInstaller.py` and refused if it differs.
+- Merged the upstream changes of 2026-10-10: the two-version picker, the WebView2 runtime installed as Windows 11, and the updated documentation. `msedgewebview2.exe` itself stays set to Windows 7: on Wine 11.19 with runtime 142 its processes all stay up as Windows 7, while as Windows 11 its GPU processes die and the Help window stays empty.
+- WinMetadata is still set up by asking the Wine build whether it implements `RoResolveNamespace`, not by version number.
+
+---
+
 ## [2026-10-10] - Wine 11.18/11.19 and WebView2 Install Fix
 
 ### Changed

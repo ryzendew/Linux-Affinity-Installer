@@ -162,6 +162,21 @@ unzip -q "$HOME/Downloads/Affinity x64.msix" 'App/*' && cp -a App/. . && rm -rf 
 WINEPREFIX="$HOME/.AffinityLinux" wine reg add 'HKCU\Control Panel\Desktop' /v LogPixels /t REG_DWORD /d 192 /f
 ```
 
+### Microsoft Edge WebView2: Help Window Is Empty
+**Issue:** In Affinity v3 the Help window opens but stays empty. Affinity shows the Help with the Microsoft Edge WebView2 Runtime.
+
+**Cause:** With `msedgewebview2.exe` set to Windows 11 compatibility, the WebView2 GPU process fails at startup and WebView2 stops with `GPU process isn't usable. Goodbye.`
+
+**Fix:** The runtime is installed as Windows 11, and `msedgewebview2.exe` is then set to Windows 7 compatibility. Troubleshooting → "WebView2 Runtime (v3)" installs the runtime if it is missing and applies the WebView2 settings again if it is already installed. To set it by hand with the prefix's Wine:
+```bash
+WINEPREFIX="$HOME/.AffinityLinux" "$HOME/.AffinityLinux/ElementalWarriorWine/bin/wine" reg add 'HKCU\Software\Wine\AppDefaults\msedgewebview2.exe' /v Version /d win7 /f
+```
+Restart Affinity afterwards.
+
+Tested with ElementalWarrior Wine 10.10, WebView2 Runtime 142.0.3595.94 and Affinity 3.3.0.4850 on Ubuntu 26.04. On Wine 11.19 with the same runtime, all WebView2 processes stay up as Windows 7 while its GPU processes die as Windows 11. Other WebView2 dialogs were not tested.
+
+For the Canva sign-in, see [Login/Authentication Issues](#loginauthentication-issues).
+
 ### Login/Authentication Issues
 **Issue:** After signing in to Canva in the browser, the `affinity://` callback never reaches Affinity v3, or Affinity crashes when it arrives.
 

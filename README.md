@@ -28,6 +28,23 @@ A comprehensive solution for running [Affinity software](https://www.affinity.st
 
 AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer, Publisher, and the unified Affinity v3 application on Linux. The installer automatically sets up Wine (a compatibility layer for running Windows applications) with all necessary configurations, dependencies, and optimizations.
 
+## What the installer does
+
+One run of **One-Click Full Setup** gives you a working Affinity:
+
+- **Wine with the Affinity patches.** Wine 11.19 (recommended) or 11.18, built with a set of patches for Affinity: the interface rendered on the GPU, lower brush and pan lag, drag and drop from the file manager, pen pressure, Help pages, and much more. See [Wine Versions](docs/WINE-VERSIONS.md). Every download is checked against a pinned SHA-256 and refused if it differs.
+- **The Windows parts Affinity needs:** .NET Framework 4.8, the core fonts, the Visual C++ runtime and MSXML. Affinity's .NET code is compiled ahead of time for a faster start.
+- **Affinity itself**, from Serif's installer (downloaded for you, or a file you already have), with Affinity's settings fixes applied.
+- **GPU rendering** through vkd3d-proton (or DXVK on AMD), and OpenCL where your driver provides it. See [Hardware Acceleration](docs/HARDWARE-ACCELERATION.md).
+- **Help** works: the WebView2 runtime is installed with Affinity.
+- **WineFix** and its plugin loader, for fixes inside Affinity that Wine cannot make: the color picker, the Leading dropdown, the sub-tool panel's columns, crashes at startup.
+- **Your desktop**: an Affinity entry in the application menu, a desktop icon, **double-clicking an Affinity document** in your file manager opens it in Affinity, and the Canva sign-in completes in the browser.
+- **Checks at the end** of the install: font registrations and the renderer setting are verified and repaired.
+
+Afterwards, the same window updates or switches the Wine build without touching your settings, repairs the document handler and the Canva sign-in, and opens Wine's own tools.
+
+The installer sets up one Affinity, in `~/.AffinityLinux` unless you choose another folder, and points your menu and documents at it. Installing again into another folder moves them there.
+
 ## Quick Start
 
 **New to Linux or want the easiest option?** Use the AppImage:
@@ -41,6 +58,38 @@ AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer
 ```bash
 curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/main/AffinityScripts/AffinityLinuxInstaller.py | python3
 ```
+
+> **This fork.** The command above is upstream's installer. This fork carries
+> the Affinity 3.3 work described above and installs with:
+>
+> ```bash
+> curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityScripts/AffinityLinuxInstaller.py | python3
+> ```
+>
+> or from a clone, which needs no downloads for its own files:
+>
+> ```bash
+> git clone https://github.com/jfacemyer/Linux-Affinity-Manager.git
+> python3 Linux-Affinity-Manager/AffinityScripts/AffinityLinuxInstaller.py
+> ```
+>
+> The download sources that are forks rather than upstream are listed, with
+> what each must become, in [`AffinityHandler/README.md`](AffinityHandler/README.md#temporary-download-sources--must-be-repointed-before-merging).
+
+## More than one Affinity? The manager
+
+[**Affinity on Linux Manager**](AffinityManager/README.md) is optional, and changes nothing about the installer above. Use it when one install is not enough:
+
+- **Several prefixes side by side**, such as a working install and a copy to try a new Wine build in, each installed by this installer running inside the manager.
+- **The Default**: choose which install your menu, double-clicked documents and the Canva sign-in use, and give the others menu entries of their own.
+- **Back up, restore, clone and snapshot** installs, and copy settings and drive letters from one to another.
+- **Repairs** on existing installs (fonts, renderer), cleaning up old Wine builds, renaming and moving installs, and launching that never starts Affinity twice.
+
+```bash
+curl -sSL https://github.com/jfacemyer/Linux-Affinity-Manager/raw/main/AffinityManager/run.py | python3
+```
+
+It needs PyQt6, which the installer needs anyway, and installs nothing on your system. See the [manager's README](AffinityManager/README.md).
 
 <details>
 <summary><strong>Python GUI Dependencies</strong></summary>
