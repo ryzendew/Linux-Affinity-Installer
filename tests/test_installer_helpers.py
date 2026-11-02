@@ -50,6 +50,9 @@ HELPER_METHODS = (
     "has_dotnet48_runtime",
     "verify_required_wine_runtimes",
     "_release_webview2_wait",
+    "_webview2_runtime_present",
+    "_webview2_setup_processes",
+    "_wait_for_webview2_setup",
 )
 
 
@@ -1136,3 +1139,56 @@ def test_a_second_click_while_an_action_runs_is_refused(ali, monkeypatch):
     # The thread is gone: a path that skipped end_operation() does not lock the buttons.
     gui._handle_button_click(None, lambda: calls.append(2))
     assert calls == [1, 2]
+
+
+def _wait_harness(harness):
+    harness.check_cancelled = lambda: harness.cancel_event.is_set()
+    return harness
+
+
+def test_webview2_setup_wait_ends_once_the_runtime_is_in_place(harness, tmp_path):
+    """A program left running in the prefix (here an Affinity started meanwhile)
+    no longer holds the wait to its timeout once the runtime is installed."""
+    _webview2_installed(tmp_path)
+    affinity = spawn_named(tmp_path, r"C:\\Program Files\\Affinity\\Affinity\\Affinity.exe")
+    try:
+        t0 = time.monotonic()
+        assert _wait_harness(harness)._wait_for_webview2_setup(max_wait=30, interval=0.1, settle=0.1)
+        assert time.monotonic() - t0 < 5
+        assert ("success", "WebView2 installer completed and files detected") in harness.log_lines
+    finally:
+        kill_quietly(affinity)
+
+
+def test_webview2_setup_wait_ignores_wine_processes_of_other_prefixes(harness, tmp_path):
+    other = tmp_path / "other-prefix"
+    other.mkdir()
+    elsewhere = spawn_named(other, r"C:\\users\\me\\Temp\\setup.exe")
+    service = spawn_named(tmp_path, r"C:\\windows\\system32\\services.exe")
+    try:
+        t0 = time.monotonic()
+        assert _wait_harness(harness)._wait_for_webview2_setup(max_wait=30, interval=0.1, settle=0.1)
+        assert time.monotonic() - t0 < 5
+    finally:
+        kill_quietly(elsewhere, service)
+
+
+def test_webview2_setup_wait_waits_while_the_setup_runs(harness, tmp_path):
+    setup = spawn_named(tmp_path, r"C:\\users\\me\\Temp\\setup.exe")
+    try:
+        t0 = time.monotonic()
+        assert _wait_harness(harness)._wait_for_webview2_setup(max_wait=1.0, interval=0.1, settle=0.1)
+        assert time.monotonic() - t0 >= 1.0
+        assert ("warning", "WebView2 installer timeout reached - proceeding anyway") in harness.log_lines
+    finally:
+        kill_quietly(setup)
+
+
+def test_webview2_setup_wait_stops_on_cancel(harness, tmp_path):
+    setup = spawn_named(tmp_path, r"C:\\users\\me\\Temp\\setup.exe")
+    try:
+        harness.cancel_event.set()
+        assert _wait_harness(harness)._wait_for_webview2_setup(max_wait=30, interval=0.1, settle=0.1) is False
+    finally:
+        kill_quietly(setup)
+
