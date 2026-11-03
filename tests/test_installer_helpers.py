@@ -1337,6 +1337,30 @@ def test_the_step_bar_goes_back_to_the_enclosing_step_when_a_part_ends(ali):
         assert h.step_progress_signal.values[-1] == (pytest.approx(0.4), "steps")
 
 
+def test_a_step_waiting_for_the_user_says_so_and_does_not_creep(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 0.5, waiting=True):
+        assert h.step_progress_signal.values[-1] == (0.0, "waiting")
+        assert "waiting for you" in ali.AffinityInstallerGUI.STEP_PROGRESS_TEXT["waiting"]
+
+
+def test_the_setup_window_is_recognized_by_its_prefix(ali, tmp_path, monkeypatch):
+    class StandIn:
+        _process_in_prefix = inspect.getattr_static(ali.AffinityInstallerGUI, "_process_in_prefix")
+    obj = StandIn()
+    obj.directory = str(tmp_path)
+    monkeypatch.setenv("WINEPREFIX", str(tmp_path) + "/")
+    child = subprocess.Popen(["sh", "-c", "echo ready; exec sleep 5"],
+                             env=dict(os.environ), stdout=subprocess.PIPE)
+    try:
+        child.stdout.readline()  # started: its environment is the one given
+        assert obj._process_in_prefix(child.pid)
+        obj.directory = str(tmp_path / "other")
+        assert not obj._process_in_prefix(child.pid)
+    finally:
+        child.kill()
+
+
 def test_a_silent_step_creeps_but_does_not_finish(ali):
     h = _progress_harness(ali)
     with h.progress_span(0.0, 1.0, expected_seconds=1):

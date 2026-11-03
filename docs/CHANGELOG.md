@@ -10,6 +10,7 @@
 - **The installer no longer starts Affinity in the background** after installing AffinityPluginLoader, only to stop it 15 seconds later. The plugin loader writes its settings at your first launch anyway.
 - **"This step" no longer sits at 100%** after a part of a step finishes; it shows the rest of the step's progress.
 - **One-Click Setup starts right away** instead of sitting for half a minute. At every start the installer cloned ReturnColors (a 30 MB repository, then downloaded it again as a ZIP), and the setup waited for it. ReturnColors is now fetched only when you use it, as a 12 MB ZIP.
+- **The installer says when it is waiting for you in Affinity's setup window**, and brings that window to the front. It could open behind the installer or low in a corner, and the install looked stalled while it waited for a click on Install.
 
 ---
 

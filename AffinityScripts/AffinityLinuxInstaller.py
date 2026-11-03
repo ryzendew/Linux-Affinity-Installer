@@ -4724,7 +4724,7 @@ class AffinityInstallerGUI(QMainWindow):
                                      or self._progress_spans[depth - 1] is not span):
                 return
             spans = self._progress_spans if depth is None else self._progress_spans[:depth]
-            for lo, hi, _detail, _expected in reversed(spans):
+            for lo, hi, *_rest in reversed(spans):
                 value = lo + value * (hi - lo)
             step = None
             if self._progress_spans:
@@ -4741,16 +4741,17 @@ class AffinityInstallerGUI(QMainWindow):
         back from the overall value so the two bars always agree, and how it
         is known. None when the step has no share. Call with the lock held."""
         step_lo, step_hi = 0.0, 1.0
-        for lo, hi, _detail, _expected in reversed(self._progress_spans):
+        for lo, hi, *_rest in reversed(self._progress_spans):
             step_lo, step_hi = lo + step_lo * (hi - lo), lo + step_hi * (hi - lo)
-        _lo, _hi, detail, expected = self._progress_spans[-1]
-        how = "measured" if detail else "estimate" if expected else "steps"
+        _lo, _hi, detail, expected, waiting = self._progress_spans[-1]
+        how = ("waiting" if waiting else "measured" if detail
+               else "estimate" if expected else "steps")
         if step_hi <= step_lo:
             return None
         return (min(max((value - step_lo) / (step_hi - step_lo), 0.0), 1.0), how)
 
     @contextlib.contextmanager
-    def progress_span(self, lo, hi, expected_seconds=None, detail=False):
+    def progress_span(self, lo, hi, expected_seconds=None, detail=False, waiting=False):
         """Give the enclosed step the share lo..hi (0-1) of the current scale.
 
         expected_seconds: the step reports nothing while it runs (a winetricks
@@ -4759,11 +4760,13 @@ class AffinityInstallerGUI(QMainWindow):
         so the bar keeps moving without claiming the step is done.
         detail: let the helper's own progress (update_detail_progress) fill
         the share, as for a download.
+        waiting: the step waits for the user in another program's window (the
+        Affinity setup); the step bar says so and shows no percentage.
         """
         with self._progress_lock:
             if not self._progress_spans:
                 self._progress_floor = 0.0
-            span = (lo, hi, detail, expected_seconds)
+            span = (lo, hi, detail, expected_seconds, waiting)
             self._progress_spans.append(span)
             depth = len(self._progress_spans)
         self._update_progress_at(depth, 0.0)
@@ -4812,6 +4815,7 @@ class AffinityInstallerGUI(QMainWindow):
         "measured": "This step: {p}% downloaded",
         "estimate": "This step: about {p}% (estimated from the time it usually takes)",
         "steps": "This step: {p}% of its parts done",
+        "waiting": "This step: waiting for you in Affinity's setup window",
     }
 
     def _update_step_progress_safe(self, value, how):
@@ -4823,6 +4827,11 @@ class AffinityInstallerGUI(QMainWindow):
             self.step_progress.hide()
             return
         percent = int(value * 100)
+        # No percentage while the step waits for the user: a busy bar.
+        if how == "waiting":
+            self.step_progress.setRange(0, 0)
+        else:
+            self.step_progress.setRange(0, 100)
         self.step_progress.setValue(percent)
         self.step_caption.setText(
             self.STEP_PROGRESS_TEXT.get(how, "This step: {p}%").format(p=percent)
@@ -17453,6 +17462,49 @@ Would you like to continue with {distro_name} anyway?"""
         "#affinity-installer-setupuiexe-crashes"
     )
 
+    def _bring_setup_window_forward(self, stop):
+        """Raise Affinity's setup window once it has opened.
+
+        It waits for the user to click Install, and it opened where Wine put
+        it, often behind this window or low in a corner, so an install looked
+        stalled for minutes. Uses xdotool, on X11 and XWayland; without it,
+        or on Wine's Wayland driver, nothing happens and the step text still
+        says what to do."""
+        if not shutil.which("xdotool"):
+            return
+        deadline = time.monotonic() + 300
+        while not stop.wait(2.0) and time.monotonic() < deadline:
+            try:
+                found = subprocess.run(
+                    ["xdotool", "search", "--name", "^Affinity$"],
+                    capture_output=True, text=True, timeout=5,
+                ).stdout.split()
+                for window in found:
+                    pid = subprocess.run(
+                        ["xdotool", "getwindowpid", window],
+                        capture_output=True, text=True, timeout=5,
+                    ).stdout.strip()
+                    if not pid.isdigit() or not self._process_in_prefix(int(pid)):
+                        continue
+                    subprocess.run(
+                        ["xdotool", "windowactivate", window],
+                        capture_output=True, timeout=5,
+                    )
+                    self.log("Brought Affinity's setup window to the front", "info")
+                    return
+            except (OSError, subprocess.SubprocessError):
+                return
+
+    def _process_in_prefix(self, pid):
+        """True when process pid runs in this installer's Wine prefix."""
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                variables = f.read().split(b"\0")
+        except OSError:
+            return False
+        wanted = b"WINEPREFIX=" + os.fsencode(str(Path(self.directory)))
+        return any(v.rstrip(b"/") == wanted.rstrip(b"/") for v in variables)
+
     def install_affinity_v3_from_msi(self, installer_file, env):
         """Install Affinity v3 from the MSI package embedded in its setup executable.
 
@@ -17650,19 +17702,33 @@ Would you like to continue with {distro_name} anyway?"""
             # Run installer. The shares from here follow the time each step
             # takes on a fresh install: the setup about a minute, the native
             # images 30-40 s, WebView2 one to two minutes, the rest seconds.
-            self.update_progress_text("Running installer...")
+            self.update_progress_text(
+                "Waiting for you: click Install in Affinity's setup window "
+                "(it may open behind this one)"
+            )
             self.update_progress(0.05)
 
             env["WINEDEBUG"] = "-all"
             self.log("Launching installer...", "info")
-            self.log("Follow the installation wizard in the window that opens.", "info")
+            self.log(
+                "Affinity's setup window opens next and waits for you to click Install; "
+                "it may open behind this window.",
+                "info",
+            )
             self.log("Click 'No' if you encounter any errors.", "warning")
 
             # Run installer and wait, capturing logs (with fallback)
-            with self.progress_span(0.05, 0.35, expected_seconds=60):
-                success = self._run_installer_and_capture(
-                    installer_file, env, label="installer"
-                )
+            raise_stop = threading.Event()
+            threading.Thread(
+                target=self._bring_setup_window_forward, args=(raise_stop,), daemon=True
+            ).start()
+            with self.progress_span(0.05, 0.35, waiting=True):
+                try:
+                    success = self._run_installer_and_capture(
+                        installer_file, env, label="installer"
+                    )
+                finally:
+                    raise_stop.set()
                 if not success and not self.check_cancelled():
                     self.log("Installer process exited with a non-zero status", "warning")
 
