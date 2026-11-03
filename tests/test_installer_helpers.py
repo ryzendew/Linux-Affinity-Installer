@@ -1255,7 +1255,7 @@ def _progress_harness(ali):
         pass
 
     for name in ("update_progress", "update_detail_progress", "_update_progress_at",
-                 "progress_span"):
+                 "_step_progress_locked", "progress_span"):
         setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
     obj = StandIn()
     obj._progress_lock = threading.Lock()
@@ -1325,6 +1325,16 @@ def test_the_step_bar_follows_the_innermost_step_and_says_how(ali):
             assert h.step_progress_signal.values[-1][1] == "estimate"
     # No step running: the step bar is hidden.
     assert h.step_progress_signal.values[-1] == (0.0, "")
+
+
+def test_the_step_bar_goes_back_to_the_enclosing_step_when_a_part_ends(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 1.0):
+        with h.progress_span(0.0, 0.4, expected_seconds=60):
+            pass
+        # Not the finished part's 100%, which would stay up while the enclosing
+        # step works on until its next report.
+        assert h.step_progress_signal.values[-1] == (pytest.approx(0.4), "steps")
 
 
 def test_a_silent_step_creeps_but_does_not_finish(ali):

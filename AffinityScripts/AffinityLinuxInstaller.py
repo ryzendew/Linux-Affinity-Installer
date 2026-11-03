@@ -4730,19 +4730,24 @@ class AffinityInstallerGUI(QMainWindow):
             if self._progress_spans:
                 value = max(value, self._progress_floor)
                 self._progress_floor = value
-                # The innermost step's own share of the bar, read back from
-                # the overall value so the two bars always agree.
                 if depth is None or depth == len(self._progress_spans):
-                    step_lo, step_hi = 0.0, 1.0
-                    for lo, hi, _detail, _expected in reversed(self._progress_spans):
-                        step_lo, step_hi = lo + step_lo * (hi - lo), lo + step_hi * (hi - lo)
-                    _lo, _hi, detail, expected = self._progress_spans[-1]
-                    how = "measured" if detail else "estimate" if expected else "steps"
-                    if step_hi > step_lo:
-                        step = (min(max((value - step_lo) / (step_hi - step_lo), 0.0), 1.0), how)
+                    step = self._step_progress_locked(value)
         self.progress_signal.emit(value)
         if step is not None:
             self.step_progress_signal.emit(*step)
+
+    def _step_progress_locked(self, value):
+        """The innermost step's own share of the bar at overall `value`, read
+        back from the overall value so the two bars always agree, and how it
+        is known. None when the step has no share. Call with the lock held."""
+        step_lo, step_hi = 0.0, 1.0
+        for lo, hi, _detail, _expected in reversed(self._progress_spans):
+            step_lo, step_hi = lo + step_lo * (hi - lo), lo + step_hi * (hi - lo)
+        _lo, _hi, detail, expected = self._progress_spans[-1]
+        how = "measured" if detail else "estimate" if expected else "steps"
+        if step_hi <= step_lo:
+            return None
+        return (min(max((value - step_lo) / (step_hi - step_lo), 0.0), 1.0), how)
 
     @contextlib.contextmanager
     def progress_span(self, lo, hi, expected_seconds=None, detail=False):
@@ -4782,8 +4787,14 @@ class AffinityInstallerGUI(QMainWindow):
             with self._progress_lock:
                 del self._progress_spans[depth - 1:]
                 done = not self._progress_spans
+                step = None if done else self._step_progress_locked(self._progress_floor)
             if done:
                 self.step_progress_signal.emit(0.0, "")
+            elif step is not None:
+                # The enclosing step is the current one again. Show its own
+                # progress: the 100% of the part that just ended would stay up
+                # until the enclosing step next reports, which can be minutes.
+                self.step_progress_signal.emit(*step)
 
     def _update_progress_safe(self, value):
         """Thread-safe progress update handler (called from main thread)"""
@@ -23355,81 +23366,13 @@ Would you like to continue with {distro_name} anyway?"""
 
             self.log("✓ AffinityHook.exe confirmed present", "success")
 
-            # ── 6. Inform user, then immediately run AffinityHook ────────────────────
-            self.log(
-                "\nInforming user about AffinityPluginLoader installation...", "info"
-            )
-            self.show_message(
-                "AffinityPluginLoader Installed",
-                "AffinityPluginLoader + WineFix have been installed!\n\n"
-                "The installer will now run AffinityHook.exe once in the background "
-                "to complete its initialisation.\n\n"
-                "You do not need to do anything — this will take a few seconds.",
-                "info",
-            )
-            self.log("Running AffinityHook.exe to complete initialisation...", "info")
-            try:
-                # Use the exact same wine + env as the .desktop entry does
-                wine_bin = str(self.get_wine_path("wine"))
-                hook_exe_path = str(
-                    Path(self.directory)
-                    / "drive_c"
-                    / "Program Files"
-                    / "Affinity"
-                    / "Affinity"
-                    / "AffinityHook.exe"
-                )
-                env = os.environ.copy()
-                env["WINEPREFIX"] = self.directory
-                env["WINEDEBUG"] = "-all,fixme-all"
-                # Apply GPU and DXVK env vars exactly as the .desktop does
-                gpu_env = self.get_gpu_env_vars()
-                dxvk_env = self.get_dxvk_env_vars()
-                if gpu_env:
-                    for var in gpu_env.strip().split():
-                        if "=" in var:
-                            k, v = var.split("=", 1)
-                            env[k] = v
-                if dxvk_env:
-                    for var in dxvk_env.strip().split():
-                        if "=" in var:
-                            k, v = var.split("=", 1)
-                            env[k] = v
-                self.log(f'Launching: {wine_bin} "{hook_exe_path}"', "info")
-                proc = subprocess.Popen(
-                    [wine_bin, hook_exe_path],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                self.log(
-                    "AffinityHook.exe launched — waiting 15 seconds then closing...",
-                    "info",
-                )
-                try:
-                    proc.wait(timeout=15)
-                    self.log(
-                        "AffinityHook.exe exited on its own within 15 seconds.", "info"
-                    )
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    wineserver_bin = str(self.get_wine_path("wineserver"))
-                    subprocess.run(
-                        [wineserver_bin, "-k"],
-                        env=env,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    self.log("✓ AffinityHook.exe closed after 15 seconds.", "success")
-            except Exception as e:
-                self.log(f"⚠ Could not run AffinityHook.exe: {e}", "warning")
-                self.log("  You may need to run it once manually.", "info")
+            # AffinityPluginLoader writes its config files at Affinity's first
+            # launch, and the WineFix setting this installer needs is written
+            # above. Starting Affinity here and killing it after 15 seconds, as
+            # this step used to, cut a cold first start off halfway and left a
+            # window in which the user could start a second instance.
 
-            # ── 7. Patch Affinity.desktop to launch AffinityHook.exe ─────────────────
+            # ── 6. Patch Affinity.desktop to launch AffinityHook.exe ─────────────────
             self.log("\nPatching Affinity.desktop to use AffinityHook.exe...", "info")
             self._patch_affinity_desktop_for_hook()
 
