@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-11-03] - Faster node editing
+
+### Changed
+- **Wine 11.21 installs [`11.21-r5`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r5) and Wine 11.20 [`11.20-r7`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r7)**, which have the fix below.
+
+### Fixed
+- **Editing the nodes of a dense path is much faster.** Affinity draws a small marker on every node of the path being edited, tens of thousands per frame on a detailed engraving, and Wine drew each one separately. It now draws runs of identical markers together, and the square roots Affinity's geometry code uses constantly run on the CPU's own instruction. While dragging a node, drawing the markers went from more than half of Affinity's time to a tenth.
+
+---
+
 ## [2026-11-03] - Hang fix
 
 ### Changed
