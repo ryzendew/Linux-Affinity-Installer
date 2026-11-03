@@ -19361,74 +19361,56 @@ Would you like to continue with {distro_name} anyway?"""
                 if not dest_file.exists():
                     all_exist = False
 
-            # Download ReturnColors from GitHub (still in Patch/ directory, not in AffinityPatcherSettings/)
-            returncolors_dest = (
-                Path(self.directory) / "Patch" / "return-affinity-colors"
-            )
-            returncolors_repo = (
-                "https://github.com/ShawnTheBeachy/return-affinity-colors.git"
-            )
 
-            # Check if ReturnColors project folder exists (it's inside return-affinity-colors/ReturnColors/)
-            returncolors_project_exists = (
-                returncolors_dest.exists()
-                and (returncolors_dest / "ReturnColors").exists()
-                and (
-                    returncolors_dest / "ReturnColors" / "ReturnColors.csproj"
-                ).exists()
-            )
+            if files_copied and not silent:
+                self.log("Patcher files are ready in .AffinityLinux/Patch/", "success")
+            elif files_downloaded and not silent:
+                self.log(
+                    "Patcher files downloaded and ready in .AffinityLinux/Patch/",
+                    "success",
+                )
+            elif not all_exist and not silent:
+                self.log("Some patcher files are missing", "warning")
 
-            if not returncolors_project_exists:
-                if not silent:
-                    self.log("Downloading ReturnColors from GitHub...", "info")
+            return all_exist
+        except Exception as e:
+            if not silent:
+                self.log(f"Error ensuring patcher files: {e}", "error")
+            return False
 
-                # Try git clone first (preferred method)
-                if self.check_command("git"):
-                    try:
-                        # Remove existing directory if it exists but is incomplete
-                        if returncolors_dest.exists():
-                            shutil.rmtree(returncolors_dest)
+    def ensure_return_colors_files(self, silent=False):
+        """Fetch ReturnColors into .AffinityLinux/Patch/ for the return-colors
+        feature. Only that feature needs it: fetched at every start and before
+        One-Click Setup, which waited on it, it held the setup up for half a
+        minute."""
+        with _PATCHER_FILES_LOCK:
+            try:
+                # Download ReturnColors from GitHub (still in Patch/ directory, not in AffinityPatcherSettings/)
+                returncolors_dest = (
+                    Path(self.directory) / "Patch" / "return-affinity-colors"
+                )
+                returncolors_repo = (
+                    "https://github.com/ShawnTheBeachy/return-affinity-colors.git"
+                )
+                returncolors_dest.parent.mkdir(parents=True, exist_ok=True)
 
-                        # Clone the repository
-                        success, stdout, stderr = self.run_command(
-                            [
-                                "git",
-                                "clone",
-                                "--depth",
-                                "1",
-                                returncolors_repo,
-                                str(returncolors_dest),
-                            ],
-                            check=False,
-                            capture=True,
-                        )
+                # Check if ReturnColors project folder exists (it's inside return-affinity-colors/ReturnColors/)
+                returncolors_project_exists = (
+                    returncolors_dest.exists()
+                    and (returncolors_dest / "ReturnColors").exists()
+                    and (
+                        returncolors_dest / "ReturnColors" / "ReturnColors.csproj"
+                    ).exists()
+                )
 
-                        if success:
-                            if not silent:
-                                self.log(
-                                    "ReturnColors downloaded from GitHub via git",
-                                    "success",
-                                )
-                        else:
-                            if not silent:
-                                self.log(
-                                    f"Git clone failed: {stderr[:200] if stderr else 'Unknown error'}",
-                                    "warning",
-                                )
-                            # Fall through to zip download
-                            if returncolors_dest.exists():
-                                shutil.rmtree(returncolors_dest)
-                    except Exception as e:
-                        if not silent:
-                            self.log(f"Error cloning ReturnColors: {e}", "warning")
-                        if returncolors_dest.exists():
-                            try:
-                                shutil.rmtree(returncolors_dest)
-                            except:
-                                pass
+                def project_ready():
+                    return (returncolors_dest / "ReturnColors" / "ReturnColors.csproj").exists()
 
-                # Fallback: Download as zip and extract
                 if not returncolors_project_exists:
+                    if not silent:
+                        self.log("Downloading ReturnColors from GitHub...", "info")
+
+                    # The ZIP first.
                     try:
                         # Download zip from GitHub
                         zip_url = "https://github.com/ShawnTheBeachy/return-affinity-colors/archive/refs/heads/main.zip"
@@ -19449,7 +19431,7 @@ Would you like to continue with {distro_name} anyway?"""
                             # Extract zip
                             with zipfile.ZipFile(temp_zip_path, "r") as zip_ref:
                                 # Extract to a temp directory first
-                                temp_extract = dest_patch_dir / ".temp_returncolors"
+                                temp_extract = returncolors_dest.parent / ".temp_returncolors"
                                 if temp_extract.exists():
                                     shutil.rmtree(temp_extract)
                                 temp_extract.mkdir(exist_ok=True)
@@ -19512,24 +19494,57 @@ Would you like to continue with {distro_name} anyway?"""
                     except Exception as e:
                         if not silent:
                             self.log(f"Error downloading ReturnColors: {e}", "warning")
-            elif not silent:
-                self.log("ReturnColors already exists in .AffinityLinux/Patch/", "info")
+                    # A clone as the fallback: the repository is 30 MB and took 20-35 s
+                    # to clone, where its ZIP (12 MB) downloads in about 2 s.
+                    if not project_ready() and self.check_command("git"):
+                        try:
+                            # Remove existing directory if it exists but is incomplete
+                            if returncolors_dest.exists():
+                                shutil.rmtree(returncolors_dest)
 
-            if files_copied and not silent:
-                self.log("Patcher files are ready in .AffinityLinux/Patch/", "success")
-            elif files_downloaded and not silent:
-                self.log(
-                    "Patcher files downloaded and ready in .AffinityLinux/Patch/",
-                    "success",
-                )
-            elif not all_exist and not silent:
-                self.log("Some patcher files are missing", "warning")
+                            # Clone the repository
+                            success, stdout, stderr = self.run_command(
+                                [
+                                    "git",
+                                    "clone",
+                                    "--depth",
+                                    "1",
+                                    returncolors_repo,
+                                    str(returncolors_dest),
+                                ],
+                                check=False,
+                                capture=True,
+                            )
 
-            return all_exist
-        except Exception as e:
-            if not silent:
-                self.log(f"Error ensuring patcher files: {e}", "error")
-            return False
+                            if success:
+                                if not silent:
+                                    self.log(
+                                        "ReturnColors downloaded from GitHub via git",
+                                        "success",
+                                    )
+                            else:
+                                if not silent:
+                                    self.log(
+                                        f"Git clone failed: {stderr[:200] if stderr else 'Unknown error'}",
+                                        "warning",
+                                    )
+                                # Fall through to zip download
+                                if returncolors_dest.exists():
+                                    shutil.rmtree(returncolors_dest)
+                        except Exception as e:
+                            if not silent:
+                                self.log(f"Error cloning ReturnColors: {e}", "warning")
+                            if returncolors_dest.exists():
+                                try:
+                                    shutil.rmtree(returncolors_dest)
+                                except:
+                                    pass
+
+                elif not silent:
+                    self.log("ReturnColors already exists in .AffinityLinux/Patch/", "info")
+            except Exception as e:
+                if not silent:
+                    self.log(f"Error fetching ReturnColors: {e}", "warning")
 
     def build_affinity_patcher(self):
         """Build the AffinityPatcher .NET project"""
@@ -19669,7 +19684,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.log(f"ReturnColors directory not found: {returncolors_dir}", "warning")
             self.log("Attempting to download ReturnColors from GitHub...", "info")
             # Try to ensure it's downloaded
-            self.ensure_patcher_files(silent=True)
+            self.ensure_return_colors_files(silent=True)
             # Check again after download attempt
             returncolors_repo_dir = patch_dir / "return-affinity-colors"
             returncolors_dir = returncolors_repo_dir / "ReturnColors"
@@ -19799,7 +19814,7 @@ Would you like to continue with {distro_name} anyway?"""
         )
 
         # Ensure patcher files (including ReturnColors) are available
-        self.ensure_patcher_files(silent=True)
+        self.ensure_return_colors_files(silent=True)
 
         # Check if .NET SDK is available, try to install if missing
         if not self.check_dotnet_sdk():
@@ -21703,6 +21718,7 @@ Would you like to continue with {distro_name} anyway?"""
 
         # Ensure patcher files are available
         self.ensure_patcher_files()
+        self.ensure_return_colors_files()
 
         # Check if .NET SDK 10.0+ is installed (required for ReturnColors)
         if not self.check_dotnet_sdk_10():

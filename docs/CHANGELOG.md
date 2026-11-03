@@ -9,6 +9,7 @@
 - **Editing the nodes of a dense path is much faster.** Affinity draws a small marker on every node of the path being edited, tens of thousands per frame on a detailed engraving, and Wine drew each one separately. It now draws runs of identical markers together, and the square roots Affinity's geometry code uses constantly run on the CPU's own instruction. While dragging a node, drawing the markers went from more than half of Affinity's time to a tenth.
 - **The installer no longer starts Affinity in the background** after installing AffinityPluginLoader, only to stop it 15 seconds later. The plugin loader writes its settings at your first launch anyway.
 - **"This step" no longer sits at 100%** after a part of a step finishes; it shows the rest of the step's progress.
+- **One-Click Setup starts right away** instead of sitting for half a minute. At every start the installer cloned ReturnColors (a 30 MB repository, then downloaded it again as a ZIP), and the setup waited for it. ReturnColors is now fetched only when you use it, as a 12 MB ZIP.
 
 ---
 
