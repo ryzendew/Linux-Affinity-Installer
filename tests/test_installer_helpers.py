@@ -268,7 +268,7 @@ def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
     assert config["wine_url"] == (
-        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r1/"
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r2/"
         "ElementalWarrior-wine-11.21.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_21_SHA256
@@ -278,11 +278,11 @@ def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
     assert moved["wine_sha256"] == ali.WINE_11_21_SHA256
 
 
-def test_the_fallback_wine_is_11_20_r2(ali, monkeypatch):
+def test_the_fallback_wine_is_11_20_r3(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
     assert config["wine_url"] == (
-        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r2/"
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r3/"
         "ElementalWarrior-wine-11.20.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_20_SHA256

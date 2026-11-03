@@ -3,11 +3,12 @@
 ## [2026-11-02] - Wine 11.21, heavy vector art
 
 ### Changed
-- **Wine 11.21 is the recommended version**, installed from [`11.21-r1`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r1) and pinned by SHA-256. It carries the whole Affinity patch set, less two fixes Wine 11.21 now makes itself. The choices are now Wine 11.21 (recommended) and Wine 11.20 (fallback); 11.19 is no longer offered.
-- **The 11.20 choice installs [`11.20-r2`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r2)**, which has the fixes below.
+- **Wine 11.21 is the recommended version**, installed from [`11.21-r2`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r2) and pinned by SHA-256. It carries the whole Affinity patch set, less two fixes Wine 11.21 now makes itself. The choices are now Wine 11.21 (recommended) and Wine 11.20 (fallback); 11.19 is no longer offered.
+- **The 11.20 choice installs [`11.20-r3`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r3)**, which has the fixes below.
 
 ### Fixed
 - **Heavy vector art no longer stalls.** Selecting a dense engraving (138,000 curves) took two to three minutes, because Wine re-processed its outline each time; it now takes about 2 seconds, and nudging it 2 to 3 seconds.
+- **Programs no longer crash as they exit.** Affinity's setup window, and any program that had drawn with Vulkan, crashed while closing (a core dump instead of a clean exit).
 - **Very large fills and strokes draw correctly.** Shapes with more than 65,535 points of geometry drew the wrong triangles, leaving holes or stray slivers.
 
 ---
