@@ -10261,14 +10261,18 @@ class AffinityInstallerGUI(QMainWindow):
         """One-click setup in background thread"""
         self.start_operation("One-Click Full Setup")
 
-        # Ensure patcher files are available
-        self.ensure_patcher_files()
+        # The first percent of the bar. Without a share of its own, each
+        # patcher file's download filled the whole bar (75% a minute in) and
+        # then dropped back to 1% at step 1.
+        with self.progress_span(0.0, 0.01):
+            # Ensure patcher files are available
+            self.ensure_patcher_files()
 
-        # Ask which GPU to use (for multi GPUs systems)
-        gpus = self.detect_gpus()
-        gpu_config_file = Path(self.directory) / ".gpu_config"
-        if not gpu_config_file.exists() and len(gpus) > 2:
-            self.configure_gpu_selection()
+            # Ask which GPU to use (for multi GPUs systems)
+            gpus = self.detect_gpus()
+            gpu_config_file = Path(self.directory) / ".gpu_config"
+            if not gpu_config_file.exists() and len(gpus) > 2:
+                self.configure_gpu_selection()
 
         if self.check_cancelled():
             return
@@ -11105,9 +11109,11 @@ class AffinityInstallerGUI(QMainWindow):
         """Download installer then run installation (runs in background)."""
         try:
             self.log(f"Downloading from: {download_url}", "info")
-            if not self.download_file(
-                download_url, installer_path_str, f"{display_name} installer"
-            ):
+            with self.progress_span(0.0, 0.2, detail=True):
+                downloaded = self.download_file(
+                    download_url, installer_path_str, f"{display_name} installer"
+                )
+            if not downloaded:
                 self.log(
                     "Download failed. Please try providing your own installer file.",
                     "error",
@@ -11122,7 +11128,7 @@ class AffinityInstallerGUI(QMainWindow):
                 return
             self.log(f"Download completed: {installer_path_str}", "success")
             # Proceed to install (will end operation in wrapper)
-            self._run_installation_entry(app_code, installer_path_str)
+            self._run_installation_entry(app_code, installer_path_str, start=0.2)
         except Exception as e:
             self.log(f"Error during download+install: {e}", "error")
             self.end_operation()
@@ -17292,10 +17298,15 @@ Would you like to continue with {distro_name} anyway?"""
             self.log(f"Update error: {e}", "error")
             self.show_message("Update Error", f"An error occurred:\n{e}", "error")
 
-    def _run_installation_entry(self, app_name, installer_path):
-        """Wrapper: run installation and always end operation."""
+    def _run_installation_entry(self, app_name, installer_path, start=0.0):
+        """Wrapper: run installation and always end operation. `start` is
+        where its share of the bar begins (after the installer's download)."""
         try:
-            self.run_installation(app_name, installer_path)
+            # The installation's own share, closed before end_operation resets
+            # the bar: a helper's download inside it (the WinRT facades, the
+            # plugin loader) no longer fills the whole bar for a moment.
+            with self.progress_span(start, 1.0):
+                self.run_installation(app_name, installer_path)
         finally:
             self.end_operation()
 

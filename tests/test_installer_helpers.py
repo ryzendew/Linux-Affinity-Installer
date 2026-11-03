@@ -1291,6 +1291,22 @@ def test_a_helpers_own_progress_needs_a_detail_span(ali):
             assert h.progress_signal.values[-1] == pytest.approx(0.1)
 
 
+def test_one_click_downloads_nothing_before_the_bar_has_shares(ali):
+    # The patcher files download first; outside any span, their percent was
+    # the whole bar's.
+    src = inspect.getsource(ali.AffinityInstallerGUI._one_click_setup_thread)
+    before = src.split("self.ensure_patcher_files()")[0]
+    assert "with self.progress_span(" in before
+
+
+def test_the_affinity_install_has_a_share_of_its_own(ali):
+    # Its helpers download (WinRT facades, the plugin loader); without a span
+    # each download filled the bar, and the installer's own download got none.
+    gui = ali.AffinityInstallerGUI
+    assert "with self.progress_span(" in inspect.getsource(gui._run_installation_entry)
+    assert "detail=True" in inspect.getsource(gui._download_then_install)
+
+
 def test_a_silent_step_creeps_but_does_not_finish(ali):
     h = _progress_harness(ali)
     with h.progress_span(0.0, 1.0, expected_seconds=1):

@@ -10,6 +10,7 @@
 - **Heavy vector art no longer stalls.** Selecting a dense engraving (138,000 curves) took two to three minutes, because Wine re-processed its outline each time; it now takes about 2 seconds, and nudging it 2 to 3 seconds.
 - **Programs no longer crash as they exit.** Affinity's setup window, and any program that had drawn with Vulkan, crashed while closing (a core dump instead of a clean exit).
 - **Selecting and nudging very large vector art is about three times faster.** On a 138,000-curve engraving, each select or nudge spent most of its time in Wine preparing a fill Affinity never uses and redrawing the same selection outline from scratch; a nudge now takes about 1 second instead of 2.5.
+- **The progress bar no longer races ahead at the start.** The first files the setup downloads each filled the whole bar, so it read 75% a minute in and then fell back to 1%; helper downloads during the Affinity install did the same for a moment. They now stay within their own small share.
 - **Very large fills and strokes draw correctly.** Shapes with more than 65,535 points of geometry drew the wrong triangles, leaving holes or stray slivers.
 
 ---
