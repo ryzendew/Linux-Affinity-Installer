@@ -363,6 +363,21 @@ def test_streaming_reports_failure_and_stores_output(harness):
     assert ok is True
 
 
+def test_streaming_ends_when_the_command_exits_though_a_child_keeps_the_pipe(harness):
+    """`wine start /wait` that brings a prefix up leaves a wineserver and Wine's
+    services holding its stdout; the run must end with the command."""
+    started = time.monotonic()
+    try:
+        ok = harness.run_command_streaming(
+            ["bash", "-c", "sleep 297.5 & printf 'done\\n'; exit 0"], stall_timeout=300
+        )
+        elapsed = time.monotonic() - started
+        assert ok is True
+        assert elapsed < 20, f"waited {elapsed:.1f}s for a child that keeps the pipe"
+    finally:
+        subprocess.run(["pkill", "-f", "sleep 297[.]5"], check=False)
+
+
 def test_streaming_does_not_flag_normal_failure_as_stall(harness):
     harness.run_command_streaming(["bash", "-c", "exit 1"])
     assert harness._last_command_stalled is False

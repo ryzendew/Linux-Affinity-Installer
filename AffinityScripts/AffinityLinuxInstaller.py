@@ -7501,6 +7501,7 @@ class AffinityInstallerGUI(QMainWindow):
             next_probe = started + probe_every
             last_activity = activity_probe() if activity_probe else None
             quiet_noted = False
+            exited_at = None
 
             while True:
                 if self.cancel_event.is_set():
@@ -7512,6 +7513,15 @@ class AffinityInstallerGUI(QMainWindow):
                     line = lines.get(timeout=0.5)
                 except queue.Empty:
                     now = time.monotonic()
+                    # The command has exited but its output pipe stays open:
+                    # a wineserver or Wine service it started inherited it
+                    # (a `wine start /wait` that brought the prefix up), and
+                    # those run on. Stop reading a few seconds after the exit
+                    # rather than wait for them.
+                    if process.poll() is not None:
+                        exited_at = exited_at or now
+                        if now - exited_at >= 5:
+                            break
                     if activity_probe and now >= next_probe:
                         next_probe = now + probe_every
                         try:
