@@ -23,6 +23,8 @@ import tempfile
 import queue
 from pathlib import Path
 import time
+import math
+import contextlib
 import signal
 import shlex
 
@@ -49,6 +51,21 @@ WINETRICKS_COMPONENTS = [
     ("tahoma", "Tahoma Font"),
     ("renderer=vulkan", "Vulkan Renderer"),
 ]
+
+# Roughly how long each verb takes, in seconds, for the progress bar: each gets
+# a share of it in proportion, and creeps through that share while it runs,
+# since winetricks says nothing until it is done. Measured on a fresh 11.21
+# prefix on a fast machine (dotnet48 246 s, which includes .NET 4.0; the rest
+# 6-11 s), rounded up for slower ones.
+WINETRICKS_EXPECTED_SECONDS = {
+    "dotnet48": 360,
+    "corefonts": 10,
+    "vcrun2022": 20,
+    "msxml3": 15,
+    "msxml6": 10,
+    "tahoma": 8,
+    "renderer=vulkan": 8,
+}
 
 # Side column (Quick Start / Troubleshooting) sizing. The floor keeps a column
 # wide enough for its icon plus a few words of label; MIN_WINDOW_WIDTH is the
@@ -1297,6 +1314,11 @@ class AffinityInstallerGUI(QMainWindow):
         self._button_spinner_map = {}
         self._last_clicked_button = None
         self._operation_button = None
+        # Shares of the progress bar handed to the steps running now
+        # (progress_span); the bar never moves back while any is open.
+        self._progress_lock = threading.Lock()
+        self._progress_spans = []
+        self._progress_floor = 0.0
 
         self.log_file_path = Path.home() / "AffinitySetup.log"
         self.log_file = None
@@ -1677,8 +1699,15 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("WebView2 Runtime:", "info")
             if self.check_webview2_installed():
                 self.log(f"  Microsoft Edge WebView2 Runtime: ✓ Installed", "success")
+            elif not self.affinity_v3_exe_path().exists():
+                # It is installed with Affinity v3 (ensure_webview2_runtime), the
+                # step after this summary: missing here is not yet, not a fault.
+                self.log("  Microsoft Edge WebView2 Runtime: installed with Affinity "
+                         "(for its Help pages)", "info")
             else:
-                self.log(f"  Microsoft Edge WebView2 Runtime: ✗ Not installed", "error")
+                self.log("  Microsoft Edge WebView2 Runtime: ✗ Not installed — "
+                         "Affinity's Help stays blank; add it with "
+                         "'WebView2 Runtime (v3)'", "error")
 
         self.log("", "info")
 
@@ -4586,8 +4615,80 @@ class AffinityInstallerGUI(QMainWindow):
             pass
 
     def update_progress(self, value):
-        """Update progress bar (thread-safe via signal)"""
+        """Update progress bar (thread-safe via signal). Inside progress_span()
+        the value is the current step's own 0-1, placed within its share."""
+        self._update_progress_at(None, value)
+
+    def update_detail_progress(self, value):
+        """Progress a helper reports about its own work (a download's bytes, a
+        winetricks download's percent). It moves the bar only when the caller
+        opened a span for that helper (progress_span(..., detail=True)), or
+        when no step is running: a helper called in passing, such as an icon
+        download, would otherwise fill the whole step it happens to be in."""
+        with self._progress_lock:
+            if self._progress_spans and not self._progress_spans[-1][2]:
+                return
+        self._update_progress_at(None, value)
+
+    def _update_progress_at(self, depth, value, span=None):
+        """Place value (0-1) through the outermost `depth` spans (all when
+        None). While a span is open the bar only moves forward: steps that
+        reset to 0 on their own no longer send it back. With `span`, nothing
+        happens unless that span is still the one at `depth` (a late tick from
+        a step that has just ended)."""
+        try:
+            value = min(max(float(value), 0.0), 1.0)
+        except (TypeError, ValueError):
+            return
+        with self._progress_lock:
+            if span is not None and (len(self._progress_spans) < depth
+                                     or self._progress_spans[depth - 1] is not span):
+                return
+            spans = self._progress_spans if depth is None else self._progress_spans[:depth]
+            for lo, hi, _detail in reversed(spans):
+                value = lo + value * (hi - lo)
+            if self._progress_spans:
+                value = max(value, self._progress_floor)
+                self._progress_floor = value
         self.progress_signal.emit(value)
+
+    @contextlib.contextmanager
+    def progress_span(self, lo, hi, expected_seconds=None, detail=False):
+        """Give the enclosed step the share lo..hi (0-1) of the current scale.
+
+        expected_seconds: the step reports nothing while it runs (a winetricks
+        verb, an unpack), so creep through the share by time instead: about
+        63% of it at the expected time, slowing toward 95% if it runs long,
+        so the bar keeps moving without claiming the step is done.
+        detail: let the helper's own progress (update_detail_progress) fill
+        the share, as for a download.
+        """
+        with self._progress_lock:
+            if not self._progress_spans:
+                self._progress_floor = 0.0
+            span = (lo, hi, detail)
+            self._progress_spans.append(span)
+            depth = len(self._progress_spans)
+        self._update_progress_at(depth, 0.0)
+        stop = threading.Event()
+        if expected_seconds:
+            started = time.monotonic()
+
+            def creep():
+                while not stop.wait(1.0):
+                    elapsed = time.monotonic() - started
+                    self._update_progress_at(
+                        depth, 0.95 * (1.0 - math.exp(-elapsed / expected_seconds)), span
+                    )
+
+            threading.Thread(target=creep, daemon=True).start()
+        try:
+            yield
+        finally:
+            stop.set()
+            self._update_progress_at(depth, 1.0)
+            with self._progress_lock:
+                del self._progress_spans[depth - 1:]
 
     def _update_progress_safe(self, value):
         """Thread-safe progress update handler (called from main thread)"""
@@ -9983,9 +10084,9 @@ class AffinityInstallerGUI(QMainWindow):
 
                         if total_size > 0:
                             percent = min(100, (downloaded * 100) // total_size)
-                            self.update_progress(percent / 100.0)
+                            self.update_detail_progress(percent / 100.0)
 
-                self.update_progress(1.0)
+                self.update_detail_progress(1.0)
                 return True
         except urllib.error.HTTPError as e:
             self.log(f"Download failed: HTTP {e.code} {e.reason}", "error")
@@ -10298,8 +10399,11 @@ class AffinityInstallerGUI(QMainWindow):
             return
 
         # Step 1: Detect distribution
+        # The bar follows the time the steps take: Wine's setup (its .NET above
+        # all) is nearly all of it; detection, dependencies and the settings
+        # and plugin files are seconds.
         self.update_progress_text("Step 1/4: Detecting Linux distribution...")
-        self.update_progress(0.05)
+        self.update_progress(0.01)
 
         if self.check_cancelled():
             return
@@ -10322,12 +10426,14 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text(
             "Step 2/4: Checking and installing system dependencies..."
         )
-        self.update_progress(0.15)
+        self.update_progress(0.02)
 
         if self.check_cancelled():
             return
 
-        if not self.check_dependencies():
+        with self.progress_span(0.02, 0.06):
+            dependencies_ok = self.check_dependencies()
+        if not dependencies_ok:
             self.log(
                 "Dependency check failed. Please resolve issues and try again.", "error"
             )
@@ -10354,7 +10460,7 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Step 3: Setup Wine environment (this includes winetricks dependencies via configure_wine)
         self.update_progress_text("Step 3/4: Setting up Wine environment...")
-        self.update_progress(0.40)
+        self.update_progress(0.06)
 
         if self.check_cancelled():
             return
@@ -10382,7 +10488,9 @@ class AffinityInstallerGUI(QMainWindow):
         # Wine download failed. Its return value used to be discarded, so a failed
         # download only appeared in the log while the flow carried on to DPI
         # configuration and beyond against a prefix that has no Wine in it.
-        if not self.setup_wine(wine_version_choice):
+        with self.progress_span(0.06, 0.95):
+            wine_ok = self.setup_wine(wine_version_choice)
+        if not wine_ok:
             if not self.check_cancelled():
                 self.log("Wine setup failed; stopping here", "error")
                 self.show_message(
@@ -10409,13 +10517,14 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Step 4: Install Affinity v3 settings to enable settings saving
         self.update_progress_text("Step 4/5: Installing Affinity v3 settings...")
-        self.update_progress(0.80)
+        self.update_progress(0.95)
 
         if self.check_cancelled():
             return
 
         self.log("Installing Affinity v3 settings files...", "info")
-        self._install_affinity_settings_thread()
+        with self.progress_span(0.95, 0.97, expected_seconds=5):
+            self._install_affinity_settings_thread()
 
         if self.check_cancelled():
             return
@@ -10424,7 +10533,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text(
             "Step 5/5: Installing AffinityPluginLoader + WineFix..."
         )
-        self.update_progress(0.90)
+        self.update_progress(0.97)
 
         if self.check_cancelled():
             return
@@ -10434,7 +10543,8 @@ class AffinityInstallerGUI(QMainWindow):
         )
         if install_dir.exists():
             self.log("\nInstalling AffinityPluginLoader + WineFix...", "info")
-            self._install_affinity_plugin_loader_thread(standalone=False)
+            with self.progress_span(0.97, 1.0, expected_seconds=10):
+                self._install_affinity_plugin_loader_thread(standalone=False)
         else:
             self.log(
                 "\nSkipping AffinityPluginLoader install - Affinity not yet installed.",
@@ -12638,6 +12748,11 @@ class AffinityInstallerGUI(QMainWindow):
                           is still installable but no longer offered
         """
         self.start_operation("Setting up Wine environment")
+        # The steps below share the bar by how long they take: the download a
+        # few percent, winetricks (.NET most of all) the rest. Closed before
+        # end_operation, so a standalone setup ends with the bar reset.
+        progress = contextlib.ExitStack()
+        progress.enter_context(self.progress_span(0.0, 1.0))
 
         try:
             # Check if cancelled at start
@@ -12696,7 +12811,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Create directory
             self.update_progress_text("Creating installation directory...")
-            self.update_progress(0.05)
+            self.update_progress(0.01)
             Path(self.directory).mkdir(parents=True, exist_ok=True)
             self.log("Installation directory created", "success")
 
@@ -12707,11 +12822,12 @@ class AffinityInstallerGUI(QMainWindow):
             wine_file = Path(self.directory) / wine_file_name
 
             self.update_progress_text(f"Downloading {wine_display_name}...")
-            self.update_progress(0.10)
             self.log(f"Downloading {wine_display_name}...", "info")
-            if not self.download_file(
-                wine_url, str(wine_file), f"{wine_display_name} binaries"
-            ):
+            with self.progress_span(0.02, 0.08, detail=True):
+                downloaded = self.download_file(
+                    wine_url, str(wine_file), f"{wine_display_name} binaries"
+                )
+            if not downloaded:
                 self.log(f"Failed to download {wine_display_name}", "error")
                 self.update_progress_text("Ready")
                 return False
@@ -12724,7 +12840,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Extract Wine
             self.update_progress_text("Extracting Wine binary...")
-            self.update_progress(0.50)
+            self.update_progress(0.08)
             self.log("Extracting Wine binary...", "info")
             try:
                 if archive_format == "gz":
@@ -12771,7 +12887,7 @@ class AffinityInstallerGUI(QMainWindow):
                 return False
 
             # Find and link Wine directory
-            self.update_progress(0.55)
+            self.update_progress(0.10)
             wine_dir = next((p for p in Path(self.directory).glob(wine_dir_pattern) if p.is_dir()), None)
             if wine_dir and wine_dir != Path(self.directory) / wine_dir_name:
                 target = Path(self.directory) / wine_dir_name
@@ -12784,7 +12900,7 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log("Wine symlink created", "success")
 
             # Verify Wine binary
-            self.update_progress(0.60)
+            self.update_progress(0.10)
             wine_binary = Path(self.directory) / wine_dir_name / "bin" / "wine"
             if not wine_binary.exists():
                 self.log("Wine binary not found", "error")
@@ -12798,7 +12914,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Download icons
             self.update_progress_text("Downloading application icons...")
-            self.update_progress(0.65)
+            self.update_progress(0.11)
             self.log("\nSetting up application icons...", "info")
             icons_dir = Path.home() / ".local" / "share" / "icons"
             icons_dir.mkdir(parents=True, exist_ok=True)
@@ -12830,7 +12946,7 @@ class AffinityInstallerGUI(QMainWindow):
             for idx, (url, path, desc) in enumerate(icons):
                 if self.check_cancelled():
                     return False
-                icon_progress = 0.65 + (idx / total_icons) * 0.05
+                icon_progress = 0.11 + (idx / total_icons) * 0.01
                 self.update_progress(icon_progress)
                 if not self.download_file(url, str(path), desc):
                     self.log(
@@ -12847,11 +12963,11 @@ class AffinityInstallerGUI(QMainWindow):
             # build what it supports rather than keeping a version list.
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Setting up Windows Metadata...")
-                self.update_progress(0.70)
+                self.update_progress(0.12)
                 self.setup_winmetadata()
             elif self.wine_resolves_winrt_namespaces():
                 self.update_progress_text("Setting up Windows Metadata...")
-                self.update_progress(0.70)
+                self.update_progress(0.12)
                 self.install_combined_winmetadata()
             else:
                 self.log(
@@ -12869,8 +12985,8 @@ class AffinityInstallerGUI(QMainWindow):
 
             if cache_all_wine_versions():
                 self.update_progress_text("Caching other Wine versions...")
-                self.update_progress(0.72)
-                self._download_all_wine_versions_to_cache(wine_version)
+                with self.progress_span(0.12, 0.17, expected_seconds=30):
+                    self._download_all_wine_versions_to_cache(wine_version)
             else:
                 self.log(
                     "Not caching the other Wine versions; switching downloads the one "
@@ -12897,7 +13013,7 @@ class AffinityInstallerGUI(QMainWindow):
                         self.update_progress_text(
                             "NVIDIA GPU with DXVK preference - installing d3d12 DLLs..."
                         )
-                        self.update_progress(0.80)
+                        self.update_progress(0.17)
                         self.log(
                             "NVIDIA GPU with DXVK preference - installing d3d12 DLLs and setting up DLL overrides",
                             "info",
@@ -12907,7 +13023,7 @@ class AffinityInstallerGUI(QMainWindow):
                         self.update_progress_text(
                             "Setting up vkd3d-proton (GPU rendering)..."
                         )
-                        self.update_progress(0.80)
+                        self.update_progress(0.17)
                         self.setup_vkd3d()
                 elif self.has_amd_gpu() and (
                     gpu_id.startswith("amd_") or gpu_id.startswith("auto")
@@ -12915,7 +13031,7 @@ class AffinityInstallerGUI(QMainWindow):
                     self.update_progress_text(
                         "AMD GPU detected - installing DXVK via winetricks..."
                     )
-                    self.update_progress(0.80)
+                    self.update_progress(0.17)
                     self.log(
                         "AMD GPU detected - installing DXVK via winetricks", "info"
                     )
@@ -12924,11 +13040,11 @@ class AffinityInstallerGUI(QMainWindow):
                     self.install_d3d12_dlls()
                 else:
                     self.update_progress_text("Setting up vkd3d-proton (GPU rendering)...")
-                    self.update_progress(0.80)
+                    self.update_progress(0.17)
                     self.setup_vkd3d()
             else:
                 self.update_progress_text("Installing d3d12 DLLs...")
-                self.update_progress(0.80)
+                self.update_progress(0.17)
                 self.log(
                     "GPU rendering was not chosen, but installing d3d12 DLLs into Wine for compatibility",
                     "info",
@@ -12940,8 +13056,9 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Configure Wine
             self.update_progress_text("Configuring Wine with winetricks...")
-            self.update_progress(0.90)
-            if not self.configure_wine():
+            with self.progress_span(0.18, 1.0):
+                configured = self.configure_wine()
+            if not configured:
                 return False
 
             if self.check_cancelled():
@@ -12962,6 +13079,7 @@ class AffinityInstallerGUI(QMainWindow):
             return False
 
         finally:
+            progress.close()
             # Make sure to end the operation even if there was an error or cancellation
             if (
                 hasattr(self, "current_operation")
@@ -14468,94 +14586,30 @@ class AffinityInstallerGUI(QMainWindow):
             "Installing Wine components (this may take several minutes)...", "info"
         )
         total_components = len(components)
+        expected = [WINETRICKS_EXPECTED_SECONDS.get(c, 15) for c in components]
+        # The verbs, then about half a minute of winecfg, theme, and the
+        # runtime checks after them.
+        expected.append(30)
+        total_expected = float(sum(expected))
         for idx, component in enumerate(components):
             if self.cancel_event.is_set():
                 return False
+            # This verb's share of the bar, in proportion to how long it takes.
+            share_lo = sum(expected[:idx]) / total_expected
+            share_hi = sum(expected[:idx + 1]) / total_expected
+            with self.progress_span(share_lo, share_hi,
+                                    expected_seconds=expected[idx]):
+                if not self._configure_wine_component(
+                        component, idx, total_components, env):
+                    return False
 
-            # Every verb starts from a quiet prefix: leftovers from the previous
-            # verb are what make Windows Installer queue and the run hang.
-            self.stop_prefix_wine_processes(
-                env, reason=f"starting '{component}'"
-            )
+        with self.progress_span(1.0 - expected[-1] / total_expected, 1.0,
+                                expected_seconds=expected[-1]):
+            return self._finish_wine_configuration(env, wine_cfg)
 
-            # Calculate base progress for this component (0.0 to 1.0 across all components)
-            base_progress = idx / total_components
-            component_progress_range = 1.0 / total_components
-
-            # Update progress label to show current component
-            self.update_progress_text(
-                f"Installing: {component} ({idx + 1}/{total_components})"
-            )
-
-            self.log(
-                f"Installing {component}... [{idx + 1}/{total_components}]", "info"
-            )
-            self.log("  (Progress will be shown below)", "info")
-
-            # Progress callback that updates based on component progress
-            def update_component_progress(percent):
-                # percent is 0.0-1.0 for this component
-                # Map it to overall progress
-                overall_progress = base_progress + (percent * component_progress_range)
-                self.update_progress(overall_progress)
-
-            # The fonts go in directly; winetricks only if that fails.
-            component_ok = (component in DIRECT_FONT_VERBS
-                            and self.install_font_verb_directly(component, env))
-            # Use streaming to show progress
-            if not component_ok:
-                component_ok = self.run_command_streaming(
-                    self.build_winetricks_command(component),
-                    env=env,
-                    progress_callback=update_component_progress,
-                    stall_timeout=600,
-                    activity_probe=self._prefix_activity,
-                    hard_limit=2700,
-                )
-            # The .NET installers' 32-bit setups crash intermittently under
-            # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
-            # address space); clean runs of the same verb succeed. Once more,
-            # from a stopped prefix, before giving up on one Affinity needs.
-            # A stall gets the retry too: the .NET 4.0 self-extractor has been
-            # seen to hang mid-unpack (and the stall watchdog to kill it) on one
-            # machine while the same verb ran through on another.
-            if (not component_ok and component.startswith("dotnet")
-                    and not self.cancel_event.is_set()):
-                how = "stalled" if self._last_command_stalled else "failed"
-                self.log(f"'{component}' {how}; stopping the prefix's Wine and trying once more", "warning")
-                self.stop_prefix_wine_processes(env, reason=f"retrying '{component}'")
-                component_ok = self.run_command_streaming(
-                    self.build_winetricks_command(component),
-                    env=env,
-                    progress_callback=update_component_progress,
-                    stall_timeout=600,
-                    activity_probe=self._prefix_activity,
-                    hard_limit=2700,
-                )
-            # Go by what is in the prefix, not by winetricks' exit: .NET can be
-            # complete while its installer is still being waited on.
-            if (not component_ok and component == "dotnet48"
-                    and not self.cancel_event.is_set() and self.has_dotnet48_runtime()):
-                self.log("'dotnet48' reported a problem, but .NET Framework 4.8 is installed", "success")
-                component_ok = True
-                self._last_command_stalled = False
-            if not component_ok and not self.cancel_event.is_set():
-                if self._last_command_stalled:
-                    self._stalled_components.add(component)
-                    self.log(
-                        f"'{component}' stalled — Wine stopped responding and was stopped.",
-                        "error",
-                    )
-                    self.log(
-                        "If this repeats, switch to the other Wine version (11.20 / 11.21) and try again (Wine 11+ new WoW64 hangs winetricks).",
-                        "warning",
-                    )
-                else:
-                    self.log(f"'{component}' failed — continuing with the rest", "warning")
-
-            # Mark this component as complete
-            self.update_progress(base_progress + component_progress_range)
-
+    def _finish_wine_configuration(self, env, wine_cfg):
+        """configure_wine after the verbs: renderer, Windows version, theme,
+        and the check that the runtimes Affinity needs are there."""
         if not self.cancel_event.is_set():
             self.ensure_vulkan_renderer(env)
 
@@ -14589,6 +14643,86 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text("Ready")
         return True
 
+    def _configure_wine_component(self, component, idx, total_components, env):
+        """Install one winetricks verb (configure_wine's loop body). A verb that
+        fails is logged and the rest go on; False only when cancelled."""
+        # Every verb starts from a quiet prefix: leftovers from the previous
+        # verb are what make Windows Installer queue and the run hang.
+        self.stop_prefix_wine_processes(
+            env, reason=f"starting '{component}'"
+        )
+
+        # Update progress label to show current component
+        self.update_progress_text(
+            f"Installing: {component} ({idx + 1}/{total_components})"
+        )
+
+        self.log(
+            f"Installing {component}... [{idx + 1}/{total_components}]", "info"
+        )
+        self.log("  (Progress will be shown below)", "info")
+
+        # The percent winetricks prints is its download's, the start of the
+        # verb, not the install: it fills the first tenth of the verb's share,
+        # and the time estimate (progress_span) moves the bar after that.
+        def update_component_progress(percent):
+            self.update_progress(0.1 * percent)
+
+        # The fonts go in directly; winetricks only if that fails.
+        component_ok = (component in DIRECT_FONT_VERBS
+                        and self.install_font_verb_directly(component, env))
+        # Use streaming to show progress
+        if not component_ok:
+            component_ok = self.run_command_streaming(
+                self.build_winetricks_command(component),
+                env=env,
+                progress_callback=update_component_progress,
+                stall_timeout=600,
+                activity_probe=self._prefix_activity,
+                hard_limit=2700,
+            )
+        # The .NET installers' 32-bit setups crash intermittently under
+        # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
+        # address space); clean runs of the same verb succeed. Once more,
+        # from a stopped prefix, before giving up on one Affinity needs.
+        # A stall gets the retry too: the .NET 4.0 self-extractor has been
+        # seen to hang mid-unpack (and the stall watchdog to kill it) on one
+        # machine while the same verb ran through on another.
+        if (not component_ok and component.startswith("dotnet")
+                and not self.cancel_event.is_set()):
+            how = "stalled" if self._last_command_stalled else "failed"
+            self.log(f"'{component}' {how}; stopping the prefix's Wine and trying once more", "warning")
+            self.stop_prefix_wine_processes(env, reason=f"retrying '{component}'")
+            component_ok = self.run_command_streaming(
+                self.build_winetricks_command(component),
+                env=env,
+                progress_callback=update_component_progress,
+                stall_timeout=600,
+                activity_probe=self._prefix_activity,
+                hard_limit=2700,
+            )
+        # Go by what is in the prefix, not by winetricks' exit: .NET can be
+        # complete while its installer is still being waited on.
+        if (not component_ok and component == "dotnet48"
+                and not self.cancel_event.is_set() and self.has_dotnet48_runtime()):
+            self.log("'dotnet48' reported a problem, but .NET Framework 4.8 is installed", "success")
+            component_ok = True
+            self._last_command_stalled = False
+        if not component_ok and not self.cancel_event.is_set():
+            if self._last_command_stalled:
+                self._stalled_components.add(component)
+                self.log(
+                    f"'{component}' stalled — Wine stopped responding and was stopped.",
+                    "error",
+                )
+                self.log(
+                    "If this repeats, switch to the other Wine version (11.20 / 11.21) and try again (Wine 11+ new WoW64 hangs winetricks).",
+                    "warning",
+                )
+            else:
+                self.log(f"'{component}' failed — continuing with the rest", "warning")
+
+        return not self.cancel_event.is_set()
 
     def show_main_menu(self):
         """Display main application menu"""

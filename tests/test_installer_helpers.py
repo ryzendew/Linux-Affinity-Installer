@@ -1203,3 +1203,72 @@ def test_webview2_setup_wait_stops_on_cancel(harness, tmp_path):
     finally:
         kill_quietly(setup)
 
+
+
+# --------------------------------------------------------------------------- #
+# progress bar
+# --------------------------------------------------------------------------- #
+
+
+def _progress_harness(ali):
+    class Signal:
+        def __init__(self):
+            self.values = []
+
+        def emit(self, value):
+            self.values.append(value)
+
+    class StandIn:
+        pass
+
+    for name in ("update_progress", "update_detail_progress", "_update_progress_at",
+                 "progress_span"):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    obj = StandIn()
+    obj._progress_lock = threading.Lock()
+    obj._progress_spans = []
+    obj._progress_floor = 0.0
+    obj.progress_signal = Signal()
+    return obj
+
+
+def test_a_step_reports_within_its_share_and_never_back(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.2, 0.6):
+        h.update_progress(0.5)
+        assert h.progress_signal.values[-1] == pytest.approx(0.4)
+        h.update_progress(0.0)  # a nested step resetting itself
+        assert h.progress_signal.values[-1] == pytest.approx(0.4)
+        with h.progress_span(0.5, 1.0):
+            h.update_progress(0.5)
+            assert h.progress_signal.values[-1] == pytest.approx(0.2 + 0.4 * 0.75)
+    assert h.progress_signal.values[-1] == pytest.approx(0.6)
+    # Outside any step the bar is set as given, so end_operation can reset it.
+    h.update_progress(0.0)
+    assert h.progress_signal.values[-1] == 0.0
+
+
+def test_a_helpers_own_progress_needs_a_detail_span(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 0.5):
+        h.update_detail_progress(1.0)  # an icon download in passing
+        assert max(h.progress_signal.values) == 0.0
+        with h.progress_span(0.1, 0.3, detail=True):
+            h.update_detail_progress(0.5)
+            assert h.progress_signal.values[-1] == pytest.approx(0.1)
+
+
+def test_a_silent_step_creeps_but_does_not_finish(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 1.0, expected_seconds=1):
+        time.sleep(2.3)
+        crept = h.progress_signal.values[-1]
+    assert 0.5 < crept < 0.95
+    assert h.progress_signal.values[-1] == 1.0
+
+
+def test_the_slow_verbs_get_the_most_of_the_bar(ali):
+    names = [name for name, _ in ali.WINETRICKS_COMPONENTS]
+    assert set(names) <= set(ali.WINETRICKS_EXPECTED_SECONDS)
+    times = ali.WINETRICKS_EXPECTED_SECONDS
+    assert times["dotnet48"] > sum(t for n, t in times.items() if n != "dotnet48")
