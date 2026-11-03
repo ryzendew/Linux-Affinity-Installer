@@ -17473,7 +17473,7 @@ Would you like to continue with {distro_name} anyway?"""
             else:
                 # For custom installers, copy to Wine prefix with sanitized filename (remove spaces)
                 self.update_progress_text("Copying installer...")
-                self.update_progress(0.1)
+                self.update_progress(0.02)
                 original_filename = installer_path_obj.name
                 sanitized_filename = self.sanitize_filename(original_filename)
                 installer_file = Path(self.directory) / sanitized_filename
@@ -17485,7 +17485,7 @@ Would you like to continue with {distro_name} anyway?"""
 
             # Set Windows version
             self.update_progress_text("Configuring Wine...")
-            self.update_progress(0.2)
+            self.update_progress(0.04)
             # Check if this is Affinity v3 or v2
             installer_name = installer_file.name.lower()
             is_affinity_v3 = (
@@ -17510,9 +17510,11 @@ Would you like to continue with {distro_name} anyway?"""
             )
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
-            # Run installer
+            # Run installer. The shares from here follow the time each step
+            # takes on a fresh install: the setup about a minute, the native
+            # images 30-40 s, WebView2 one to two minutes, the rest seconds.
             self.update_progress_text("Running installer...")
-            self.update_progress(0.3)
+            self.update_progress(0.05)
 
             env["WINEDEBUG"] = "-all"
             self.log("Launching installer...", "info")
@@ -17520,21 +17522,22 @@ Would you like to continue with {distro_name} anyway?"""
             self.log("Click 'No' if you encounter any errors.", "warning")
 
             # Run installer and wait, capturing logs (with fallback)
-            success = self._run_installer_and_capture(
-                installer_file, env, label="installer"
-            )
-            if not success and not self.check_cancelled():
-                self.log("Installer process exited with a non-zero status", "warning")
+            with self.progress_span(0.05, 0.35, expected_seconds=60):
+                success = self._run_installer_and_capture(
+                    installer_file, env, label="installer"
+                )
+                if not success and not self.check_cancelled():
+                    self.log("Installer process exited with a non-zero status", "warning")
 
-            installs_unified = app_name in ("Add", "Affinity (Unified)")
-            affinity_v3_exe = self.affinity_v3_exe_path()
-            msi_failure = "The Affinity setup finished without installing Affinity."
-            if installs_unified and not affinity_v3_exe.exists() and not self.check_cancelled():
-                self.log("The Affinity setup finished without installing Affinity", "warning")
-                _, msi_failure = self.install_affinity_v3_from_msi(installer_file, env)
+                installs_unified = app_name in ("Add", "Affinity (Unified)")
+                affinity_v3_exe = self.affinity_v3_exe_path()
+                msi_failure = "The Affinity setup finished without installing Affinity."
+                if installs_unified and not affinity_v3_exe.exists() and not self.check_cancelled():
+                    self.log("The Affinity setup finished without installing Affinity", "warning")
+                    _, msi_failure = self.install_affinity_v3_from_msi(installer_file, env)
 
             # Clean up installer (only if it was copied to Wine prefix, not if it's in .AffinityLinux/Installer/)
-            self.update_progress(0.5)
+            self.update_progress(0.35)
             if installer_file.parent != installer_dir:
                 # Only remove if it was copied (not the original in Installer folder)
                 if installer_file.exists():
@@ -17558,7 +17561,7 @@ Would you like to continue with {distro_name} anyway?"""
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Restoring Windows Metadata...")
-                self.update_progress(0.6)
+                self.update_progress(0.36)
                 self.restore_winmetadata()
             else:
                 self.log(
@@ -17571,7 +17574,7 @@ Would you like to continue with {distro_name} anyway?"""
             # Configure OpenCL (if enabled)
             if self.is_opencl_enabled():
                 self.update_progress_text("Setting up GPU rendering for Affinity...")
-                self.update_progress(0.7)
+                self.update_progress(0.37)
                 self.configure_opencl(app_name)
             else:
                 self.log("GPU rendering was not chosen; vkd3d-proton not placed beside Affinity", "info")
@@ -17581,7 +17584,7 @@ Would you like to continue with {distro_name} anyway?"""
                 wine_version = self.get_current_wine_version()
                 if wine_version in ["9.14", "10.10"]:
                     self.update_progress_text("Configuring wintypes.dll for v2 app...")
-                    self.update_progress(0.82)
+                    self.update_progress(0.38)
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
@@ -17595,7 +17598,7 @@ Would you like to continue with {distro_name} anyway?"""
                 if wine_version in ["9.14", "10.10"]:
                     # Copy wintypes.dll and set override
                     self.update_progress_text("Configuring wintypes.dll for v3 app...")
-                    self.update_progress(0.82)
+                    self.update_progress(0.38)
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
@@ -17605,15 +17608,17 @@ Would you like to continue with {distro_name} anyway?"""
 
                 # Patch the DLL to fix settings saving
                 self.update_progress_text("Patching DLL for settings fix...")
-                self.update_progress(0.85)
+                self.update_progress(0.39)
                 self.patch_affinity_dll(app_name)
 
                 # Only now: the patch rewrites Serif.Affinity.dll and keeps its
                 # identity, so images compiled before it are loaded anyway and
                 # Affinity dies in clr.dll at every start.
                 if self.affinity_v3_exe_path().exists():
-                    self.precompile_affinity()
-                    self.ensure_webview2_runtime()
+                    with self.progress_span(0.42, 0.55, expected_seconds=40):
+                        self.precompile_affinity()
+                    with self.progress_span(0.55, 0.88, expected_seconds=100):
+                        self.ensure_webview2_runtime()
 
             # Install the file-manager handler before the desktop entry, which
             # only claims the document types once the handler is in place.
@@ -17643,7 +17648,8 @@ Would you like to continue with {distro_name} anyway?"""
                     self.log(
                         "\nRunning AffinityPluginLoader + WineFix install...", "info"
                     )
-                    self._install_affinity_plugin_loader_thread(standalone=False)
+                    with self.progress_span(0.91, 0.96, expected_seconds=10):
+                        self._install_affinity_plugin_loader_thread(standalone=False)
                 else:
                     self.log(
                         "\n⚠ Affinity directory not found — skipping AffinityPluginLoader install.",
