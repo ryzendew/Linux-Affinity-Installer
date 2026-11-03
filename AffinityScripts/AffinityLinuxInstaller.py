@@ -467,15 +467,18 @@ HANDLER_SHA256 = "5bd31facbe433a884afab9dd6861d5094726055f3c1706a4d001a800e30ed9
 # fork that carries the patches' upstream pull request.
 WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae934853"
 
-# The same patch set on Wine 11.19, offered as the fallback.
+# The same patch set on Wine 11.19, no longer offered but still installable.
 WINE_11_19_SHA256 = "637a0ec5ed8f225dd96c30796f9227f6f5a68ccc8e394a549391be7a6e9a626e"
 
-# Wine 11.20 with the full Affinity patch set, the default, pinned by content:
+# The same patch set on Wine 11.20, offered as the fallback.
+WINE_11_20_SHA256 = "337abebad2b33e14d3c574a0dabbcf332c9bbbccf340ef599c0e356a5af0f311"
+
+# Wine 11.21 with the full Affinity patch set, the default, pinned by content:
 # the 11.16 release once went three weeks without eight fixes the local builds
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_20_SHA256 = "ce47d3f9350629cb67c0e5a3091a171e26d500eed98a8f422e6f0905867ffd31"
+WINE_11_21_SHA256 = "fb08354a8bcd7a191f4f1d9179c6bcb56c4319f081769af885c8c9e996c87ca9"
 
 # vkd3d-proton (Affinity's D3D12), pinned the same way. The installer used to
 # take whatever release was newest on GitHub, so new installs got each one the
@@ -5383,20 +5386,43 @@ class AffinityInstallerGUI(QMainWindow):
         # Create button group to ensure only one radio button is selected at a time
         button_group = QButtonGroup(dialog)
 
-        # Wine 11.20 option - clean frame with radio button and description (Recommended)
+        # Wine 11.21 option - clean frame with radio button and description (Recommended)
+        wine_1121_frame = QFrame()
+        wine_1121_frame.setObjectName("optionFrame")
+        wine_1121_layout = QVBoxLayout(wine_1121_frame)
+        wine_1121_layout.setContentsMargins(12, 10, 12, 10)
+        wine_1121_layout.setSpacing(6)
+        wine_1121_radio = QRadioButton("Wine 11.21 (Recommended)")
+        wine_1121_radio.setChecked(True)
+        wine_1121_radio.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
+        )
+        wine_1121_layout.addWidget(wine_1121_radio)
+        wine_1121_desc = QLabel(
+            "Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
+        )
+        wine_1121_desc.setObjectName("optionDescription")
+        wine_1121_desc.setWordWrap(True)
+        wine_1121_desc.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+        wine_1121_layout.addWidget(wine_1121_desc)
+        options_layout.addWidget(wine_1121_frame)
+        button_group.addButton(wine_1121_radio, 0)
+
+        # Wine 11.20 option - clean frame with radio button and description
         wine_1120_frame = QFrame()
         wine_1120_frame.setObjectName("optionFrame")
         wine_1120_layout = QVBoxLayout(wine_1120_frame)
         wine_1120_layout.setContentsMargins(12, 10, 12, 10)
         wine_1120_layout.setSpacing(6)
-        wine_1120_radio = QRadioButton("Wine 11.20 (Recommended)")
-        wine_1120_radio.setChecked(True)
+        wine_1120_radio = QRadioButton("Wine 11.20")
         wine_1120_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
         )
         wine_1120_layout.addWidget(wine_1120_radio)
         wine_1120_desc = QLabel(
-            "Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
+            "Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues."
         )
         wine_1120_desc.setObjectName("optionDescription")
         wine_1120_desc.setWordWrap(True)
@@ -5405,30 +5431,7 @@ class AffinityInstallerGUI(QMainWindow):
         )
         wine_1120_layout.addWidget(wine_1120_desc)
         options_layout.addWidget(wine_1120_frame)
-        button_group.addButton(wine_1120_radio, 0)
-
-        # Wine 11.19 option - clean frame with radio button and description
-        wine_1119_frame = QFrame()
-        wine_1119_frame.setObjectName("optionFrame")
-        wine_1119_layout = QVBoxLayout(wine_1119_frame)
-        wine_1119_layout.setContentsMargins(12, 10, 12, 10)
-        wine_1119_layout.setSpacing(6)
-        wine_1119_radio = QRadioButton("Wine 11.19")
-        wine_1119_radio.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
-        )
-        wine_1119_layout.addWidget(wine_1119_radio)
-        wine_1119_desc = QLabel(
-            "Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues."
-        )
-        wine_1119_desc.setObjectName("optionDescription")
-        wine_1119_desc.setWordWrap(True)
-        wine_1119_desc.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        wine_1119_layout.addWidget(wine_1119_desc)
-        options_layout.addWidget(wine_1119_frame)
-        button_group.addButton(wine_1119_radio, 1)
+        button_group.addButton(wine_1120_radio, 1)
 
         # Add scroll area to main layout with stretch factor
         main_layout.addWidget(scroll_area, 1)
@@ -5468,10 +5471,10 @@ class AffinityInstallerGUI(QMainWindow):
         # Get result
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
-            if wine_1120_radio.isChecked():
-                self.question_dialog_response = "Wine 11.20 (Recommended)"
-            elif wine_1119_radio.isChecked():
-                self.question_dialog_response = "Wine 11.19"
+            if wine_1121_radio.isChecked():
+                self.question_dialog_response = "Wine 11.21 (Recommended)"
+            elif wine_1120_radio.isChecked():
+                self.question_dialog_response = "Wine 11.20"
         else:
             # User cancelled - return "Cancel" to match expected format
             self.question_dialog_response = "Cancel"
@@ -5720,7 +5723,7 @@ class AffinityInstallerGUI(QMainWindow):
         return self.get_wine_dir() / "bin" / binary
 
     def get_current_wine_version(self):
-        """Get the current ElementalWarrior Wine version (such as 11.19 or 11.20)"""
+        """Get the current ElementalWarrior Wine version (such as 11.20 or 11.21)"""
         # Try regular wine first
         wine = self.get_wine_path("wine")
         wine_staging = self.get_wine_path("wine-staging")
@@ -5741,7 +5744,7 @@ class AffinityInstallerGUI(QMainWindow):
                                 return "9.14"
                             elif version.startswith("10."):
                                 return "10.10"
-                            elif version in ("11.16", "11.18", "11.19", "11.20"):
+                            elif version in ("11.16", "11.18", "11.19", "11.20", "11.21"):
                                 return version
                             elif version.startswith("11."):
                                 return version
@@ -6655,7 +6658,7 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(
                 f"winetricks is running on Wine {major}.x. Wine 11+ new WoW64 mode is "
                 "known to hang the .NET installers — if a component stalls, switch "
-                "to the other Wine version (11.19 / 11.20) and try again.",
+                "to the other Wine version (11.20 / 11.21) and try again.",
                 "warning",
             )
         return major
@@ -6983,7 +6986,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(".NET Framework 4.8 is not installed in the Wine prefix.", "error")
         self.log("Affinity's SetupUI.exe crashes without it, which matches the JIT/debugger failures seen on Ubuntu.", "info")
         if self.is_ubuntu_family_distro():
-            self.log("Ubuntu-family systems use Wine 11.20 by default; if winetricks stalls on the Wine 11 new WoW64 path, switch to Wine 11.19 and try again.", "info")
+            self.log("Ubuntu-family systems use Wine 11.21 by default; if winetricks stalls on the Wine 11 new WoW64 path, switch to Wine 11.20 and try again.", "info")
         self.log("Aborting before launching the Affinity installer.", "info")
         return False
 
@@ -9897,18 +9900,18 @@ class AffinityInstallerGUI(QMainWindow):
 
     def get_recommended_wine_version(self):
         """Return the preferred bundled Wine version for the current distro"""
-        return "11.20"
+        return "11.21"
 
     def get_wine_version_dialog_options(self):
         """Return Wine version labels and descriptions for UI prompts"""
         return [
             (
-                "Wine 11.20 (Recommended)",
-                "Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
+                "Wine 11.21 (Recommended)",
+                "Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
             ),
             (
-                "Wine 11.19",
-                "Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues."
+                "Wine 11.20",
+                "Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues."
             ),
         ]
 
@@ -9926,6 +9929,8 @@ class AffinityInstallerGUI(QMainWindow):
         """Map a dialog label back to an internal Wine version"""
         if not wine_choice:
             return None
+        if wine_choice.startswith("Wine 11.21"):
+            return "11.21"
         if wine_choice.startswith("Wine 11.20"):
             return "11.20"
         if wine_choice.startswith("Wine 11.19"):
@@ -10165,7 +10170,7 @@ class AffinityInstallerGUI(QMainWindow):
                 "reports an unsupported graphics card.\n\n"
                 "Recommended: Yes.\n\n"
                 "About OpenCL: with Yes, Affinity can also use OpenCL "
-                "acceleration on the recommended Wine 11.20. On Wine 11.11 to "
+                "acceleration on the recommended Wine 11.21. On Wine 11.11 to "
                 "11.18 OpenCL stays switched off whichever you choose, because "
                 "there it made Affinity hang at startup; builds from 11.19 carry the fix.\n\n"
                 "You can change this later.",
@@ -10358,16 +10363,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.20 (Recommended) - Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
-            "• Wine 11.19 - Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues.\n\n"
+            "• Wine 11.21 (Recommended) - Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
+            "• Wine 11.20 - Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues.\n\n"
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
-            ["Wine 11.20 (Recommended)", "Wine 11.19"],
+            ["Wine 11.21 (Recommended)", "Wine 11.20"],
         )
 
-        if wine_version == "Wine 11.20 (Recommended)":
+        if wine_version == "Wine 11.21 (Recommended)":
+            wine_version_choice = "11.21"
+        elif wine_version == "Wine 11.20":
             wine_version_choice = "11.20"
-        elif wine_version == "Wine 11.19":
-            wine_version_choice = "11.19"
         else:
             self.log("Wine setup cancelled", "warning")
             self.end_operation()
@@ -12624,11 +12629,11 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(f"All dependencies installed for {distro_name}", "success")
         return True
 
-    def setup_wine(self, wine_version="11.20"):
+    def setup_wine(self, wine_version="11.21"):
         """Setup Wine environment - installs custom Wine with the Affinity patches
 
         Args:
-            wine_version: "11.20" (recommended) or "11.19", both with the full
+            wine_version: "11.21" (recommended) or "11.20", both with the full
                           patch set; "11.18" (login fix + performance patches)
                           is still installable but no longer offered
         """
@@ -14542,7 +14547,7 @@ class AffinityInstallerGUI(QMainWindow):
                         "error",
                     )
                     self.log(
-                        "If this repeats, switch to the other Wine version (11.19 / 11.20) and try again (Wine 11+ new WoW64 hangs winetricks).",
+                        "If this repeats, switch to the other Wine version (11.20 / 11.21) and try again (Wine 11+ new WoW64 hangs winetricks).",
                         "warning",
                     )
                 else:
@@ -14604,16 +14609,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.20 (Recommended) - Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
-            "• Wine 11.19 - Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues.\n\n"
+            "• Wine 11.21 (Recommended) - Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
+            "• Wine 11.20 - Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues.\n\n"
             "Note: You can switch versions later by running this setup again.",
-            ["Wine 11.20 (Recommended)", "Wine 11.19"],
+            ["Wine 11.21 (Recommended)", "Wine 11.20"],
         )
 
-        if wine_version == "Wine 11.20 (Recommended)":
+        if wine_version == "Wine 11.21 (Recommended)":
+            wine_version_choice = "11.21"
+        elif wine_version == "Wine 11.20":
             wine_version_choice = "11.20"
-        elif wine_version == "Wine 11.19":
-            wine_version_choice = "11.19"
         else:
             self.log("Wine setup cancelled", "warning")
             return
@@ -14632,7 +14637,7 @@ class AffinityInstallerGUI(QMainWindow):
         """Get Wine version configuration (URL, filename, SHA-256, etc.)
 
         Args:
-            wine_version: "11.18", "11.19" or "11.20"
+            wine_version: "11.18", "11.19", "11.20" or "11.21"
 
         Returns:
             dict with wine_url, wine_file_name, wine_sha256, wine_dir_name, wine_dir_pattern, archive_format, wine_display_name
@@ -14659,23 +14664,34 @@ class AffinityInstallerGUI(QMainWindow):
                 "archive_format": "xz",
                 "wine_display_name": "Wine 11.19 (full Affinity patch set)",
             }
-        else:  # Default to 11.20
+        elif wine_version == "11.20":
             return {
                 # POC SOURCE -- the fork's release of the 11.20 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r1/ElementalWarrior-wine-11.20.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r2/ElementalWarrior-wine-11.20.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.20.tar.xz",
                 "wine_sha256": WINE_11_20_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
                 "wine_dir_pattern": "ElementalWarrior-wine-11.20*",
                 "archive_format": "xz",
-                "wine_display_name": "Wine 11.20 (Latest - full Affinity patch set)",
+                "wine_display_name": "Wine 11.20 (full Affinity patch set)",
+            }
+        else:  # Default to 11.21
+            return {
+                # POC SOURCE -- the fork's release of the 11.21 patch set.
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r1/ElementalWarrior-wine-11.21.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.21.tar.xz",
+                "wine_sha256": WINE_11_21_SHA256,
+                "wine_dir_name": "ElementalWarriorWine",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.21*",
+                "archive_format": "xz",
+                "wine_display_name": "Wine 11.21 (Latest - full Affinity patch set)",
             }
 
     def _download_wine_to_cache(self, wine_version, cache_dir):
         """Download a Wine version to cache directory
 
         Args:
-            wine_version: "11.19" or "11.20"
+            wine_version: "11.20" or "11.21"
             cache_dir: Path to cache directory
 
         Returns:
@@ -14775,7 +14791,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["11.19", "11.20"]
+        all_versions = ["11.20", "11.21"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -14896,11 +14912,11 @@ class AffinityInstallerGUI(QMainWindow):
         except Exception as e:
             self.log(f"Error checking DXVK/vkd3d-proton updates: {e}", "warning")
 
-    def _setup_wine_switch(self, wine_version="11.20"):
+    def _setup_wine_switch(self, wine_version="11.21"):
         """Setup Wine binary only - for switching versions without reconfiguration
 
         Args:
-            wine_version: "11.19" or "11.20" (recommended)
+            wine_version: "11.20" or "11.21" (recommended)
         """
         try:
             # Get Wine version configuration
@@ -15145,16 +15161,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.20 (Recommended) - Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
-            "• Wine 11.19 - Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues.\n\n"
+            "• Wine 11.21 (Recommended) - Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
+            "• Wine 11.20 - Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues.\n\n"
             "Note: This will replace your current Wine installation.",
-            ["Wine 11.20 (Recommended)", "Wine 11.19"],
+            ["Wine 11.21 (Recommended)", "Wine 11.20"],
         )
 
-        if wine_version == "Wine 11.20 (Recommended)":
+        if wine_version == "Wine 11.21 (Recommended)":
+            wine_version_choice = "11.21"
+        elif wine_version == "Wine 11.20":
             wine_version_choice = "11.20"
-        elif wine_version == "Wine 11.19":
-            wine_version_choice = "11.19"
         else:
             self.log("Wine version switch cancelled", "warning")
             return
@@ -15479,7 +15495,7 @@ Would you like to continue with {distro_name} anyway?"""
                             "info",
                         )
                         self.log(
-                            "Close the installer, switch to the other Wine version (11.19 / 11.20), then try again.",
+                            "Close the installer, switch to the other Wine version (11.20 / 11.21), then try again.",
                             "warning",
                         )
                     else:

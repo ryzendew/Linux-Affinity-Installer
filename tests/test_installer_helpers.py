@@ -263,19 +263,30 @@ def test_release_downloads_default_to_github(ali, monkeypatch):
     )
 
 
-def test_the_default_wine_is_11_20_and_follows_the_override(ali, monkeypatch):
-    assert ali.AffinityInstallerGUI.get_recommended_wine_version(None) == "11.20"
+def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
+    assert ali.AffinityInstallerGUI.get_recommended_wine_version(None) == "11.21"
+    monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
+    config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
+    assert config["wine_url"] == (
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r1/"
+        "ElementalWarrior-wine-11.21.tar.xz"
+    )
+    assert config["wine_sha256"] == ali.WINE_11_21_SHA256
+    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
+    moved = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
+    assert moved["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
+    assert moved["wine_sha256"] == ali.WINE_11_21_SHA256
+
+
+def test_the_fallback_wine_is_11_20_r2(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
     assert config["wine_url"] == (
-        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r1/"
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r2/"
         "ElementalWarrior-wine-11.20.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_20_SHA256
-    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
-    moved = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
-    assert moved["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
-    assert moved["wine_sha256"] == ali.WINE_11_20_SHA256
+    assert config["wine_sha256"] != ali.WINE_11_21_SHA256
 
 
 def test_release_downloads_follow_the_override(ali, monkeypatch):

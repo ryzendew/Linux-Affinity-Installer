@@ -52,7 +52,7 @@ A modern graphical installer with comprehensive features and automatic dependenc
 
 **Features:**
 - One-click full setup with automatic dependency installation
-- Multiple Wine versions to choose from (11.20 recommended, 11.19 fallback)
+- Multiple Wine versions to choose from (11.21 recommended, 11.20 fallback)
 - Wine version switching without reinstalling applications
 - Automatic WebView2 Runtime installation for Affinity v3
 - DPI scaling configuration
@@ -74,7 +74,7 @@ curl -sSL https://raw.githubusercontent.com/ryzendew/AffinityOnLinux/refs/heads/
 **Usage:**
 1. Run the installer
 2. Click **"One-Click Full Setup"** for automatic configuration
-3. Choose your Wine version (11.20 recommended, 11.19 fallback)
+3. Choose your Wine version (11.21 recommended, 11.20 fallback)
 4. Use **"Update Affinity Applications"** to install or update Affinity apps
 5. Check the status log to see what's installed
 
