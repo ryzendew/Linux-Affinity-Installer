@@ -268,7 +268,7 @@ def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
     assert config["wine_url"] == (
-        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r3/"
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r4/"
         "ElementalWarrior-wine-11.21.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_21_SHA256
@@ -282,7 +282,7 @@ def test_the_fallback_wine_is_11_20_r4(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
     assert config["wine_url"] == (
-        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r4/"
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r6/"
         "ElementalWarrior-wine-11.20.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_20_SHA256
@@ -1341,3 +1341,31 @@ def test_the_slow_verbs_get_the_most_of_the_bar(ali):
     assert set(names) <= set(ali.WINETRICKS_EXPECTED_SECONDS)
     times = ali.WINETRICKS_EXPECTED_SECONDS
     assert times["dotnet48"] > sum(t for n, t in times.items() if n != "dotnet48")
+
+
+def test_winefix_guard_off_in_a_new_settings_file(ali, tmp_path):
+    assert ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert (tmp_path / "apl/config/winefix.toml").read_text() == "[patches]\nbezier_split_guard = false\n"
+
+
+def test_winefix_guard_off_keeps_the_rest_and_the_line_ends(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_bytes(b"[patches]\r\n# Guard\r\nbezier_split_guard = true\r\nwiden_stub_fix = true\r\n")
+    assert ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_bytes() == (
+        b"[patches]\r\n# Guard\r\nbezier_split_guard = false\r\nwiden_stub_fix = true\r\n")
+    assert not ali.winefix_disable_bezier_split_guard(tmp_path)
+
+
+def test_winefix_guard_off_added_when_the_key_is_missing(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[patches]\nwiden_stub_fix = true\n\n[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_text() == (
+        "[patches]\nbezier_split_guard = false\nwiden_stub_fix = true\n\n"
+        "[crash-fixes]\npin_plugin_host = true\n")
+    config.write_text("[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\nbezier_split_guard = false\n"

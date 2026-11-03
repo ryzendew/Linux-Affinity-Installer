@@ -468,6 +468,41 @@ def source_repo():
     return os.environ.get("AFFINITY_MANAGER_REPO", "").strip().rstrip("/") or SOURCE_REPO
 
 
+def winefix_disable_bezier_split_guard(install_dir):
+    """Turn off WineFix's bezier split guard in its settings file, creating the
+    file if WineFix has not written one yet. Returns True if the file changed.
+
+    The guard finds the function it hooks by a prologue byte pattern, and in
+    the Wine builds this installer offers (and in plain Wine 11.21) the first
+    match is another function: in ours, the fill triangulation, which then
+    returned at once with nothing built. Affinity drew no fills, logged
+    "Edge not found" and faulted, and a fault inside the deferred outline work
+    left a lock held and hung the next draw of that path. These builds carry
+    their own limit on bezier splitting, so the guard has nothing to add.
+    WineFix keeps a value it finds in the file and fills in defaults for the
+    rest."""
+    config = Path(install_dir) / "apl" / "config" / "winefix.toml"
+    line = "bezier_split_guard = false"
+    if not config.exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(f"[patches]\n{line}\n")
+        return True
+    # newline="" keeps a CRLF file CRLF.
+    with open(config, newline="") as f:
+        text = f.read()
+    new, count = re.subn(r"(?m)^bezier_split_guard\s*=\s*\w+[ \t]*(?=\r?$)", line, text)
+    if not count:
+        if re.search(r"(?m)^\[patches\][ \t]*\r?$", text):
+            new = re.sub(r"(?m)^\[patches\][ \t]*(\r?)$", lambda m: f"[patches]{m.group(1)}\n{line}{m.group(1)}", text, count=1)
+        else:
+            new = text + ("" if text.endswith("\n") or not text else "\n") + f"[patches]\n{line}\n"
+    if new == text:
+        return False
+    with open(config, "w", newline="") as f:
+        f.write(new)
+    return True
+
+
 def source_branch():
     return os.environ.get("AFFINITY_MANAGER_BRANCH", "").strip() or SOURCE_BRANCH
 
@@ -495,14 +530,14 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 WINE_11_19_SHA256 = "637a0ec5ed8f225dd96c30796f9227f6f5a68ccc8e394a549391be7a6e9a626e"
 
 # The same patch set on Wine 11.20, offered as the fallback.
-WINE_11_20_SHA256 = "7d103aa52d3accb409b24d7914a0ff4195186b692083cbd0c49290dd7898eef0"
+WINE_11_20_SHA256 = "a9b531ec5c822442a9c4bde0112c3c9f19b2308f4162b79e976019c219a7c80e"
 
 # Wine 11.21 with the full Affinity patch set, the default, pinned by content:
 # the 11.16 release once went three weeks without eight fixes the local builds
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_21_SHA256 = "e58bd3babe70f6d31ce5ca9283874bc14c2f51484e64029a9f9fc824a8725c0b"
+WINE_11_21_SHA256 = "687e402f22474ad19b3f47a63634af2a11e329dc335d4f0d847b6088fb4bf0bf"
 
 # vkd3d-proton (Affinity's D3D12), pinned the same way. The installer used to
 # take whatever release was newest on GitHub, so new installs got each one the
@@ -7258,6 +7293,10 @@ class AffinityInstallerGUI(QMainWindow):
             env["APT_LISTCHANGES_FRONTEND"] = "none"
             env["LANG"] = "C"  # Use C locale to avoid encoding issues
             env["LC_ALL"] = "C"
+            # The installer shows its own progress: Wine's "configuration is
+            # being updated" window is a stray one over it. Builds from
+            # 11.21-r4 / 11.20-r6 honor this; older ones ignore it.
+            env.setdefault("WINEBOOT_HIDE_DIALOG", "1")
 
             # Check if this is a sudo command
             is_sudo = (
@@ -7547,6 +7586,10 @@ class AffinityInstallerGUI(QMainWindow):
             env["APT_LISTCHANGES_FRONTEND"] = "none"
             env["LANG"] = "C"  # Use C locale to avoid encoding issues
             env["LC_ALL"] = "C"
+            # The installer shows its own progress: Wine's "configuration is
+            # being updated" window is a stray one over it. Builds from
+            # 11.21-r4 / 11.20-r6 honor this; older ones ignore it.
+            env.setdefault("WINEBOOT_HIDE_DIALOG", "1")
 
             # Unset SUDO_ASKPASS if this is a sudo command
             is_sudo = (
@@ -14931,7 +14974,7 @@ class AffinityInstallerGUI(QMainWindow):
         elif wine_version == "11.20":
             return {
                 # POC SOURCE -- the fork's release of the 11.20 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r4/ElementalWarrior-wine-11.20.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r6/ElementalWarrior-wine-11.20.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.20.tar.xz",
                 "wine_sha256": WINE_11_20_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
@@ -14942,7 +14985,7 @@ class AffinityInstallerGUI(QMainWindow):
         else:  # Default to 11.21
             return {
                 # POC SOURCE -- the fork's release of the 11.21 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r3/ElementalWarrior-wine-11.21.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r4/ElementalWarrior-wine-11.21.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.21.tar.xz",
                 "wine_sha256": WINE_11_21_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
@@ -23281,6 +23324,18 @@ Would you like to continue with {distro_name} anyway?"""
                         else:
                             self.log(
                                 "  ✓ WineFix patches Wine's own d2d1 at runtime", "success"
+                            )
+                        try:
+                            if winefix_disable_bezier_split_guard(install_dir):
+                                self.log(
+                                    "  ✓ WineFix's bezier split guard is off: it hooks the "
+                                    "wrong function in these Wine builds",
+                                    "success",
+                                )
+                        except OSError as exc:
+                            self.log(
+                                f"  ⚠ Could not turn off WineFix's bezier split guard: {exc}",
+                                "warning",
                             )
 
             # ── 5. Verify AffinityHook.exe is present after install ───────────────────
