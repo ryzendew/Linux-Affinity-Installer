@@ -956,6 +956,24 @@ def test_release_webview2_wait_stops_the_leftover_updater(harness, tmp_path):
         kill_quietly(updater, service)
 
 
+def test_release_webview2_wait_is_not_held_by_the_ngen_service(harness, tmp_path):
+    # The ngen step before WebView2 leaves .NET's native-image service running.
+    _webview2_installed(tmp_path)
+    updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")
+    ngen = spawn_named(tmp_path, r"C:\\windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorsvw.exe")
+    try:
+        stop = threading.Event()
+        thread = threading.Thread(target=harness._release_webview2_wait, args=(stop,),
+                                  kwargs={"settle_seconds": 0.3, "interval": 0.1})
+        thread.start()
+        assert wait_dead(updater), "the updater should be stopped"
+        thread.join(5)
+        assert ngen.poll() is None, "the .NET service is left alone"
+    finally:
+        stop.set()
+        kill_quietly(updater, ngen)
+
+
 def test_release_webview2_wait_waits_for_the_setup(harness, tmp_path):
     _webview2_installed(tmp_path)
     updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")

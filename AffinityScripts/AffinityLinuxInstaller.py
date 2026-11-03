@@ -308,6 +308,13 @@ def kept_installers_dir():
     return Path(base) / "AffinityOnLinux" / "installers"
 
 
+# The WebView2 Runtime installer, kept after its first download for every later
+# prefix (it is the same 180 MB file each time).
+def webview2_cache_file():
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or os.path.join(Path.home(), ".cache")
+    return Path(base) / "AffinityOnLinux" / "webview2" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+
+
 def pe_file_version(path):
     """The FileVersion string in a PE's version resource, or None."""
     try:
@@ -7664,9 +7671,13 @@ class AffinityInstallerGUI(QMainWindow):
         return win.replace("/", "\\")
 
     # Wine's own background processes, which never count as an installer.
+    # Services that may run beside the WebView2 setup without being part of
+    # it. mscorsvw.exe is .NET's native-image service, which the ngen step just
+    # before WebView2 leaves running: counted as setup work, it kept the wait
+    # from ever releasing, and the install sat for the 1-hour stall timeout.
     WINE_SERVICE_EXES = {"services.exe", "winedevice.exe", "svchost.exe", "plugplay.exe",
                          "rpcss.exe", "lsass.exe", "explorer.exe", "start.exe",
-                         "conhost.exe", "wineboot.exe"}
+                         "conhost.exe", "wineboot.exe", "mscorsvw.exe"}
 
     def _webview2_runtime_present(self):
         """msedgewebview2.exe is in place (it lives in a per-version folder)."""
@@ -10580,7 +10591,27 @@ class AffinityInstallerGUI(QMainWindow):
         self.prompt_affinity_install_signal.emit()
 
     def _prompt_affinity_install(self):
-        """Prompt user to install an Affinity application"""
+        """Prompt user to install an Affinity application.
+
+        Wine's setup and the Affinity install it offers are one install, timed
+        as one: the clock keeps running across these questions, less the time
+        they wait for an answer, instead of stopping at the end of the Wine
+        setup and starting again for Affinity."""
+        clock = getattr(self, "_clock_settle", None)
+        if clock is not None:
+            clock.stop()
+        asked = time.monotonic()
+        try:
+            self._ask_and_install_affinity()
+        finally:
+            if clock is not None and self._clock_started is not None:
+                started, t0 = self._clock_started
+                self._clock_started = (started, t0 + (time.monotonic() - asked))
+                if not self.operation_in_progress:
+                    clock.start()  # nothing started: stop as usual
+
+    def _ask_and_install_affinity(self):
+        """The questions behind _prompt_affinity_install, and the install."""
         reply = QMessageBox.question(
             self,
             "Install Affinity now?",
@@ -16212,13 +16243,27 @@ Would you like to continue with {distro_name} anyway?"""
                 Path(self.directory) / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
             )
 
-            if not self.download_file(
-                webview2_url, str(webview2_file), "WebView2 Runtime"
-            ):
-                self.log("Failed to download WebView2 Runtime", "error")
-                return False
-
-            self.log("WebView2 Runtime downloaded", "success")
+            cached = webview2_cache_file()
+            cached_version = pe_file_version(cached) if cached.is_file() else None
+            if cached_version:
+                shutil.copyfile(cached, webview2_file)
+                self.log(f"Using the kept WebView2 Runtime installer ({cached_version})", "success")
+            else:
+                if not self.download_file(
+                    webview2_url, str(webview2_file), "WebView2 Runtime"
+                ):
+                    self.log("Failed to download WebView2 Runtime", "error")
+                    return False
+                self.log("WebView2 Runtime downloaded", "success")
+                # Kept for later prefixes; a partial copy never takes the name.
+                if pe_file_version(webview2_file):
+                    try:
+                        cached.parent.mkdir(parents=True, exist_ok=True)
+                        partial = cached.with_name(cached.name + ".part")
+                        shutil.copyfile(webview2_file, partial)
+                        partial.replace(cached)
+                    except OSError as e:
+                        self.log(f"Could not keep the WebView2 installer for later: {e}", "info")
 
             # Step 3: Install WebView2 Runtime using system wine (like Affinity v3)
             self.log("Installing Microsoft Edge WebView2 Runtime...", "info")
