@@ -1262,6 +1262,9 @@ def _progress_harness(ali):
     obj._progress_spans = []
     obj._progress_floor = 0.0
     obj.progress_signal = Signal()
+    obj.step_progress_signal = Signal()
+    obj.step_progress_signal.emit = (
+        lambda value, how, sig=obj.step_progress_signal: sig.values.append((value, how)))
     return obj
 
 
@@ -1305,6 +1308,23 @@ def test_the_affinity_install_has_a_share_of_its_own(ali):
     gui = ali.AffinityInstallerGUI
     assert "with self.progress_span(" in inspect.getsource(gui._run_installation_entry)
     assert "detail=True" in inspect.getsource(gui._download_then_install)
+
+
+def test_the_step_bar_follows_the_innermost_step_and_says_how(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.2, 0.6):
+        h.update_progress(0.5)
+        assert h.step_progress_signal.values[-1] == (pytest.approx(0.5), "steps")
+        with h.progress_span(0.5, 1.0, detail=True):
+            # A new step starts its own bar at 0, whatever the overall bar says.
+            assert h.step_progress_signal.values[-1] == (pytest.approx(0.0), "measured")
+            h.update_detail_progress(0.5)
+            assert h.step_progress_signal.values[-1] == (pytest.approx(0.5), "measured")
+            assert h.progress_signal.values[-1] == pytest.approx(0.2 + 0.4 * 0.75)
+        with h.progress_span(0.9, 1.0, expected_seconds=60):
+            assert h.step_progress_signal.values[-1][1] == "estimate"
+    # No step running: the step bar is hidden.
+    assert h.step_progress_signal.values[-1] == (0.0, "")
 
 
 def test_a_silent_step_creeps_but_does_not_finish(ali):

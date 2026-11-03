@@ -1224,6 +1224,10 @@ class AffinityInstallerGUI(QMainWindow):
 
     log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(float)
+    # The current step's own progress (0-1) and how it is known: "measured"
+    # (a download's bytes), "estimate" (by the time the step usually takes),
+    # "steps" (its sub-steps done), or "" when no step is running.
+    step_progress_signal = pyqtSignal(float, str)
     progress_text_signal = pyqtSignal(str)
     operation_clock_signal = pyqtSignal(bool)
     show_message_signal = pyqtSignal(str, str, str)
@@ -1334,6 +1338,7 @@ class AffinityInstallerGUI(QMainWindow):
 
         self.log_signal.connect(self._log_safe)
         self.progress_signal.connect(self._update_progress_safe)
+        self.step_progress_signal.connect(self._update_step_progress_safe)
         self.progress_text_signal.connect(self._update_progress_text_safe)
         self.operation_clock_signal.connect(self._operation_clock_safe)
         self.show_message_signal.connect(self._show_message_safe)
@@ -3718,13 +3723,45 @@ class AffinityInstallerGUI(QMainWindow):
         progress_container.setSpacing(12)
         progress_container.setContentsMargins(0, 0, 0, 0)
 
+        # Two bars, each saying what it measures: the whole operation, which
+        # never moves back, and the step running now, which starts again at
+        # each step. The step bar is hidden while no step is running.
+        bars = QVBoxLayout()
+        bars.setSpacing(4)
+        bars.setContentsMargins(0, 0, 0, 0)
+        self.overall_caption = QLabel("")
+        self.overall_caption.setObjectName("progressTimerLabel")
+        self.overall_caption.setToolTip(
+            "How far through the whole operation you are, from the time "
+            "each part of it usually takes. It never moves back."
+        )
+        bars.addWidget(self.overall_caption)
         self.progress = QProgressBar()
         self.progress.setObjectName("progressBar")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(8)
-        progress_container.addWidget(self.progress, stretch=1)
+        bars.addWidget(self.progress)
+        self.step_caption = QLabel("")
+        self.step_caption.setObjectName("progressTimerLabel")
+        self.step_caption.setToolTip(
+            "The step running now. Downloads show real progress; steps that "
+            "report nothing while they run are estimated from the time they "
+            "usually take, so a full bar there does not mean the step is done."
+        )
+        bars.addWidget(self.step_caption)
+        self.step_progress = QProgressBar()
+        self.step_progress.setObjectName("progressBar")
+        self.step_progress.setRange(0, 100)
+        self.step_progress.setValue(0)
+        self.step_progress.setTextVisible(False)
+        self.step_progress.setFixedHeight(4)
+        bars.addWidget(self.step_progress)
+        self.overall_caption.hide()
+        self.step_caption.hide()
+        self.step_progress.hide()
+        progress_container.addLayout(bars, stretch=1)
 
         self.cancel_btn = QPushButton("✕")
         self.cancel_btn.setObjectName("cancelButton")
@@ -4652,12 +4689,25 @@ class AffinityInstallerGUI(QMainWindow):
                                      or self._progress_spans[depth - 1] is not span):
                 return
             spans = self._progress_spans if depth is None else self._progress_spans[:depth]
-            for lo, hi, _detail in reversed(spans):
+            for lo, hi, _detail, _expected in reversed(spans):
                 value = lo + value * (hi - lo)
+            step = None
             if self._progress_spans:
                 value = max(value, self._progress_floor)
                 self._progress_floor = value
+                # The innermost step's own share of the bar, read back from
+                # the overall value so the two bars always agree.
+                if depth is None or depth == len(self._progress_spans):
+                    step_lo, step_hi = 0.0, 1.0
+                    for lo, hi, _detail, _expected in reversed(self._progress_spans):
+                        step_lo, step_hi = lo + step_lo * (hi - lo), lo + step_hi * (hi - lo)
+                    _lo, _hi, detail, expected = self._progress_spans[-1]
+                    how = "measured" if detail else "estimate" if expected else "steps"
+                    if step_hi > step_lo:
+                        step = (min(max((value - step_lo) / (step_hi - step_lo), 0.0), 1.0), how)
         self.progress_signal.emit(value)
+        if step is not None:
+            self.step_progress_signal.emit(*step)
 
     @contextlib.contextmanager
     def progress_span(self, lo, hi, expected_seconds=None, detail=False):
@@ -4673,7 +4723,7 @@ class AffinityInstallerGUI(QMainWindow):
         with self._progress_lock:
             if not self._progress_spans:
                 self._progress_floor = 0.0
-            span = (lo, hi, detail)
+            span = (lo, hi, detail, expected_seconds)
             self._progress_spans.append(span)
             depth = len(self._progress_spans)
         self._update_progress_at(depth, 0.0)
@@ -4696,10 +4746,43 @@ class AffinityInstallerGUI(QMainWindow):
             self._update_progress_at(depth, 1.0)
             with self._progress_lock:
                 del self._progress_spans[depth - 1:]
+                done = not self._progress_spans
+            if done:
+                self.step_progress_signal.emit(0.0, "")
 
     def _update_progress_safe(self, value):
         """Thread-safe progress update handler (called from main thread)"""
         self.progress.setValue(int(value * 100))
+        if not hasattr(self, "overall_caption"):
+            return
+        if self.operation_in_progress and value > 0:
+            what = self.current_operation or "the whole operation"
+            self.overall_caption.setText(f"Overall: {int(value * 100)}% of {what}")
+            self.overall_caption.show()
+        else:
+            self.overall_caption.hide()
+
+    STEP_PROGRESS_TEXT = {
+        "measured": "This step: {p}% downloaded",
+        "estimate": "This step: about {p}% (estimated from the time it usually takes)",
+        "steps": "This step: {p}% of its parts done",
+    }
+
+    def _update_step_progress_safe(self, value, how):
+        """The current step's bar (main thread). Hidden when no step runs."""
+        if not hasattr(self, "step_progress"):
+            return
+        if not how or not self.operation_in_progress:
+            self.step_caption.hide()
+            self.step_progress.hide()
+            return
+        percent = int(value * 100)
+        self.step_progress.setValue(percent)
+        self.step_caption.setText(
+            self.STEP_PROGRESS_TEXT.get(how, "This step: {p}%").format(p=percent)
+        )
+        self.step_caption.show()
+        self.step_progress.show()
 
     def _update_progress_text_safe(self, text):
         """Thread-safe progress text update handler (called from main thread)"""
