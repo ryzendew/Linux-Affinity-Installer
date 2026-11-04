@@ -4736,6 +4736,17 @@ class AffinityInstallerGUI(QMainWindow):
         if step is not None:
             self.step_progress_signal.emit(*step)
 
+    def mark_step_waiting(self, span):
+        """The step `span` now waits for the user (see progress_span's
+        waiting). Nothing happens once that step has ended."""
+        with self._progress_lock:
+            if not self._progress_spans or self._progress_spans[-1] is not span:
+                return
+            self._progress_spans[-1] = span[:4] + (True,)
+            step = self._step_progress_locked(self._progress_floor)
+        if step is not None:
+            self.step_progress_signal.emit(*step)
+
     def _step_progress_locked(self, value):
         """The innermost step's own share of the bar at overall `value`, read
         back from the overall value so the two bars always agree, and how it
@@ -17462,38 +17473,54 @@ Would you like to continue with {distro_name} anyway?"""
         "#affinity-installer-setupuiexe-crashes"
     )
 
-    def _bring_setup_window_forward(self, stop):
-        """Raise Affinity's setup window once it has opened.
+    SETUP_WAITING_TEXT = (
+        "Waiting for you: click Install in Affinity's setup window "
+        "(it may open behind this one)"
+    )
+
+    def _bring_setup_window_forward(self, stop, span):
+        """Once Affinity's setup window has opened, say the install waits for
+        the user (the step `span`) and raise the window.
 
         It waits for the user to click Install, and it opened where Wine put
         it, often behind this window or low in a corner, so an install looked
-        stalled for minutes. Uses xdotool, on X11 and XWayland; without it,
-        or on Wine's Wayland driver, nothing happens and the step text still
-        says what to do."""
-        if not shutil.which("xdotool"):
-            return
-        deadline = time.monotonic() + 300
-        while not stop.wait(2.0) and time.monotonic() < deadline:
+        stalled for minutes. Uses xdotool, on X11 and XWayland. When the
+        window cannot be found (Wine's Wayland driver, an xdotool failure, or
+        a minute without it), the step says it waits for the user anyway."""
+        window = None
+        deadline = time.monotonic() + 60
+        while not stop.wait(1.0) and time.monotonic() < deadline:
             try:
-                found = subprocess.run(
-                    ["xdotool", "search", "--name", "^Affinity$"],
-                    capture_output=True, text=True, timeout=5,
-                ).stdout.split()
-                for window in found:
-                    pid = subprocess.run(
-                        ["xdotool", "getwindowpid", window],
-                        capture_output=True, text=True, timeout=5,
-                    ).stdout.strip()
-                    if not pid.isdigit() or not self._process_in_prefix(int(pid)):
-                        continue
-                    subprocess.run(
-                        ["xdotool", "windowactivate", window],
-                        capture_output=True, timeout=5,
-                    )
-                    self.log("Brought Affinity's setup window to the front", "info")
-                    return
+                window = self._find_setup_window()
             except (OSError, subprocess.SubprocessError):
-                return
+                break
+            if window:
+                break
+        if stop.is_set():
+            return
+        self.update_progress_text(self.SETUP_WAITING_TEXT)
+        self.mark_step_waiting(span)
+        if window:
+            try:
+                subprocess.run(["xdotool", "windowactivate", window], capture_output=True, timeout=5)
+                self.log("Brought Affinity's setup window to the front", "info")
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    def _find_setup_window(self):
+        """The X window id of Affinity's setup window in this prefix, or None."""
+        found = subprocess.run(
+            ["xdotool", "search", "--name", "^Affinity$"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+        for window in found:
+            pid = subprocess.run(
+                ["xdotool", "getwindowpid", window],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            if pid.isdigit() and self._process_in_prefix(int(pid)):
+                return window
+        return None
 
     def _process_in_prefix(self, pid):
         """True when process pid runs in this installer's Wine prefix."""
@@ -17702,9 +17729,13 @@ Would you like to continue with {distro_name} anyway?"""
             # Run installer. The shares from here follow the time each step
             # takes on a fresh install: the setup about a minute, the native
             # images 30-40 s, WebView2 one to two minutes, the rest seconds.
+            # Say that the install waits for the user only once the setup
+            # window is there to click: said at launch, it sent people looking
+            # for a window that had not opened yet. Without xdotool the window
+            # cannot be seen, so it is said at once.
+            watch_window = bool(shutil.which("xdotool"))
             self.update_progress_text(
-                "Waiting for you: click Install in Affinity's setup window "
-                "(it may open behind this one)"
+                "Starting Affinity's setup..." if watch_window else self.SETUP_WAITING_TEXT
             )
             self.update_progress(0.05)
 
@@ -17719,10 +17750,14 @@ Would you like to continue with {distro_name} anyway?"""
 
             # Run installer and wait, capturing logs (with fallback)
             raise_stop = threading.Event()
-            threading.Thread(
-                target=self._bring_setup_window_forward, args=(raise_stop,), daemon=True
-            ).start()
-            with self.progress_span(0.05, 0.35, waiting=True):
+            with self.progress_span(0.05, 0.35, waiting=not watch_window):
+                if watch_window:
+                    with self._progress_lock:
+                        setup_span = self._progress_spans[-1]
+                    threading.Thread(
+                        target=self._bring_setup_window_forward,
+                        args=(raise_stop, setup_span), daemon=True,
+                    ).start()
                 try:
                     success = self._run_installer_and_capture(
                         installer_file, env, label="installer"

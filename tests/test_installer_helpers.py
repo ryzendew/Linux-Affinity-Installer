@@ -1255,7 +1255,8 @@ def _progress_harness(ali):
         pass
 
     for name in ("update_progress", "update_detail_progress", "_update_progress_at",
-                 "_step_progress_locked", "progress_span"):
+                 "_step_progress_locked", "progress_span", "mark_step_waiting",
+                 "_bring_setup_window_forward"):
         setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
     obj = StandIn()
     obj._progress_lock = threading.Lock()
@@ -1342,6 +1343,38 @@ def test_a_step_waiting_for_the_user_says_so_and_does_not_creep(ali):
     with h.progress_span(0.0, 0.5, waiting=True):
         assert h.step_progress_signal.values[-1] == (0.0, "waiting")
         assert "waiting for you" in ali.AffinityInstallerGUI.STEP_PROGRESS_TEXT["waiting"]
+
+
+def _setup_watch(ali, h, windows, monkeypatch):
+    h.SETUP_WAITING_TEXT = ali.AffinityInstallerGUI.SETUP_WAITING_TEXT
+    h.texts, h.logs, activated = [], [], []
+    h.update_progress_text = h.texts.append
+    h.log = lambda msg, kind="info": h.logs.append(msg)
+    h._find_setup_window = lambda: windows.pop(0) if windows else None
+    monkeypatch.setattr(ali.subprocess, "run", lambda cmd, **kw: activated.append(cmd))
+    return activated
+
+
+def test_the_step_says_it_waits_only_once_the_setup_window_is_there(ali, monkeypatch):
+    h = _progress_harness(ali)
+    activated = _setup_watch(ali, h, [None, "42"], monkeypatch)
+    with h.progress_span(0.05, 0.35):
+        assert h.step_progress_signal.values[-1][1] == "steps"
+        h._bring_setup_window_forward(threading.Event(), h._progress_spans[-1])
+        assert h.step_progress_signal.values[-1] == (0.0, "waiting")
+    assert h.texts == [h.SETUP_WAITING_TEXT]
+    assert activated == [["xdotool", "windowactivate", "42"]]
+
+
+def test_a_setup_that_has_ended_is_not_marked_waiting(ali, monkeypatch):
+    h = _progress_harness(ali)
+    activated = _setup_watch(ali, h, ["42"], monkeypatch)
+    stop = threading.Event()
+    stop.set()
+    with h.progress_span(0.05, 0.35):
+        h._bring_setup_window_forward(stop, h._progress_spans[-1])
+        assert h.step_progress_signal.values[-1][1] == "steps"
+    assert h.texts == [] and activated == []
 
 
 def test_the_setup_window_is_recognized_by_its_prefix(ali, tmp_path, monkeypatch):
