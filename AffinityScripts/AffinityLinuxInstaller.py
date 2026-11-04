@@ -7005,6 +7005,25 @@ class AffinityInstallerGUI(QMainWindow):
         if lines:
             self.log("  Still running when it was stopped:\n" + "\n".join(lines[:15]), "info")
 
+    def end_install_session(self):
+        """Stop the Wine processes an install leaves running in the prefix.
+
+        Affinity starts its own session at launch. These left the manager
+        reporting leftover processes after every install; until 2026-11 the
+        AffinityHook run after the plugin loader install ended them with
+        wineserver -k, as a side effect. Leaves the prefix alone when Affinity
+        or its hook is running in it."""
+        for pid in self._prefix_wine_pids():
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    comm = f.read().strip()
+            except OSError:
+                continue
+            if comm in ("Affinity.exe", "AffinityHook.ex", "AffinityHook.exe"):
+                self.log("Affinity is running in the prefix: its Wine session is left as it is", "info")
+                return
+        self.stop_prefix_wine_processes(reason="the install is done; Affinity starts its own session")
+
     def _prefix_wine_pids(self):
         """PIDs of processes whose environment points at our WINEPREFIX.
 
@@ -17098,6 +17117,12 @@ Would you like to continue with {distro_name} anyway?"""
                     "Designer": "Affinity Designer",
                     "Publisher": "Affinity Publisher",
                 }.get(app_name, app_name)
+
+                # The install's own work is done, but the Wine session it
+                # started is still up: services, the .NET compile service,
+                # WebView2's updater, the security service. Close it, unless
+                # Affinity has been started in the prefix meanwhile.
+                self.end_install_session()
 
                 self.log(f"\n✓ {display_name} installation completed!", "success")
                 how = self.launch_instructions()

@@ -1377,6 +1377,39 @@ def test_a_setup_that_has_ended_is_not_marked_waiting(ali, monkeypatch):
     assert h.texts == [] and activated == []
 
 
+def _session_standin(ali, pids):
+    class StandIn:
+        end_install_session = inspect.getattr_static(ali.AffinityInstallerGUI, "end_install_session")
+    obj = StandIn()
+    obj.stopped, obj.logs = [], []
+    obj._prefix_wine_pids = lambda: pids
+    obj.stop_prefix_wine_processes = lambda **kw: obj.stopped.append(kw)
+    obj.log = lambda msg, kind="info": obj.logs.append(msg)
+    return obj
+
+
+def test_an_install_ends_the_wine_session_it_started(ali):
+    obj = _session_standin(ali, [os.getpid()])
+    obj.end_install_session()
+    assert len(obj.stopped) == 1
+
+
+def test_an_install_leaves_a_running_affinity_alone(ali, tmp_path):
+    exe = tmp_path / "Affinity.exe"
+    shutil.copy("/bin/sleep", exe)
+    child = subprocess.Popen([str(exe), "5"])
+    try:
+        for _ in range(100):
+            if Path(f"/proc/{child.pid}/comm").read_text().strip() == "Affinity.exe":
+                break
+            time.sleep(0.01)
+        obj = _session_standin(ali, [child.pid])
+        obj.end_install_session()
+        assert obj.stopped == []
+    finally:
+        child.kill()
+
+
 def test_the_setup_window_is_recognized_by_its_prefix(ali, tmp_path, monkeypatch):
     class StandIn:
         _process_in_prefix = inspect.getattr_static(ali.AffinityInstallerGUI, "_process_in_prefix")
