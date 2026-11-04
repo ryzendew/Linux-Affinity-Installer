@@ -32,7 +32,7 @@ AffinityOnLinux provides an easy way to install and run Affinity Photo, Designer
 
 One run of **One-Click Full Setup** gives you a working Affinity:
 
-- **Wine with the Affinity patches.** Wine 11.20 (recommended) or 11.19, built with a set of patches for Affinity: the interface rendered on the GPU, lower brush and pan lag, drag and drop from the file manager, pen pressure, Help pages, and much more. See [Wine Versions](docs/WINE-VERSIONS.md). Every download is checked against a pinned SHA-256 and refused if it differs.
+- **Wine with the Affinity patches.** Wine 11.21 (recommended) or 11.20, built with a set of patches for Affinity: the interface rendered on the GPU, lower brush and pan lag, drag and drop from the file manager, pen pressure, Help pages, and much more. See [Wine Versions](docs/WINE-VERSIONS.md). Every download is checked against a pinned SHA-256 and refused if it differs.
 - **The Windows parts Affinity needs:** .NET Framework 4.8, the core fonts, the Visual C++ runtime and MSXML. Affinity's .NET code is compiled ahead of time for a faster start.
 - **Affinity itself**, from Serif's installer (downloaded for you, or a file you already have), with Affinity's settings fixes applied.
 - **GPU rendering** through vkd3d-proton (or DXVK on AMD), and OpenCL where your driver provides it. See [Hardware Acceleration](docs/HARDWARE-ACCELERATION.md).

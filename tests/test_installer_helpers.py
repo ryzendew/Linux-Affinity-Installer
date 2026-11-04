@@ -263,19 +263,30 @@ def test_release_downloads_default_to_github(ali, monkeypatch):
     )
 
 
-def test_the_default_wine_is_11_20_and_follows_the_override(ali, monkeypatch):
-    assert ali.AffinityInstallerGUI.get_recommended_wine_version(None) == "11.20"
+def test_the_default_wine_is_11_21_and_follows_the_override(ali, monkeypatch):
+    assert ali.AffinityInstallerGUI.get_recommended_wine_version(None) == "11.21"
+    monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
+    config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
+    assert config["wine_url"] == (
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r5/"
+        "ElementalWarrior-wine-11.21.tar.xz"
+    )
+    assert config["wine_sha256"] == ali.WINE_11_21_SHA256
+    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
+    moved = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.21")
+    assert moved["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
+    assert moved["wine_sha256"] == ali.WINE_11_21_SHA256
+
+
+def test_the_fallback_wine_is_11_20_r4(ali, monkeypatch):
     monkeypatch.delenv("AFFINITY_RELEASES_FROM", raising=False)
     config = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
     assert config["wine_url"] == (
-        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r1/"
+        "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r7/"
         "ElementalWarrior-wine-11.20.tar.xz"
     )
     assert config["wine_sha256"] == ali.WINE_11_20_SHA256
-    monkeypatch.setenv("AFFINITY_RELEASES_FROM", "https://git.example.org/someone/")
-    moved = ali.AffinityInstallerGUI._get_wine_version_config(None, "11.20")
-    assert moved["wine_url"].startswith("https://git.example.org/someone/Affinity-Wine-Builder/")
-    assert moved["wine_sha256"] == ali.WINE_11_20_SHA256
+    assert config["wine_sha256"] != ali.WINE_11_21_SHA256
 
 
 def test_release_downloads_follow_the_override(ali, monkeypatch):
@@ -350,6 +361,21 @@ def test_streaming_reports_failure_and_stores_output(harness):
 
     ok = harness.run_command_streaming(["bash", "-c", "printf 'hello\\n'; exit 0"])
     assert ok is True
+
+
+def test_streaming_ends_when_the_command_exits_though_a_child_keeps_the_pipe(harness):
+    """`wine start /wait` that brings a prefix up leaves a wineserver and Wine's
+    services holding its stdout; the run must end with the command."""
+    started = time.monotonic()
+    try:
+        ok = harness.run_command_streaming(
+            ["bash", "-c", "sleep 297.5 & printf 'done\\n'; exit 0"], stall_timeout=300
+        )
+        elapsed = time.monotonic() - started
+        assert ok is True
+        assert elapsed < 20, f"waited {elapsed:.1f}s for a child that keeps the pipe"
+    finally:
+        subprocess.run(["pkill", "-f", "sleep 297[.]5"], check=False)
 
 
 def test_streaming_does_not_flag_normal_failure_as_stall(harness):
@@ -945,6 +971,24 @@ def test_release_webview2_wait_stops_the_leftover_updater(harness, tmp_path):
         kill_quietly(updater, service)
 
 
+def test_release_webview2_wait_is_not_held_by_the_ngen_service(harness, tmp_path):
+    # The ngen step before WebView2 leaves .NET's native-image service running.
+    _webview2_installed(tmp_path)
+    updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")
+    ngen = spawn_named(tmp_path, r"C:\\windows\\Microsoft.NET\\Framework64\\v4.0.30319\\mscorsvw.exe")
+    try:
+        stop = threading.Event()
+        thread = threading.Thread(target=harness._release_webview2_wait, args=(stop,),
+                                  kwargs={"settle_seconds": 0.3, "interval": 0.1})
+        thread.start()
+        assert wait_dead(updater), "the updater should be stopped"
+        thread.join(5)
+        assert ngen.poll() is None, "the .NET service is left alone"
+    finally:
+        stop.set()
+        kill_quietly(updater, ngen)
+
+
 def test_release_webview2_wait_waits_for_the_setup(harness, tmp_path):
     _webview2_installed(tmp_path)
     updater = spawn_named(tmp_path, r"C:\\Program Files (x86)\\Microsoft\\EdgeUpdate\\MicrosoftEdgeUpdate.exe")
@@ -1192,3 +1236,236 @@ def test_webview2_setup_wait_stops_on_cancel(harness, tmp_path):
     finally:
         kill_quietly(setup)
 
+
+
+# --------------------------------------------------------------------------- #
+# progress bar
+# --------------------------------------------------------------------------- #
+
+
+def _progress_harness(ali):
+    class Signal:
+        def __init__(self):
+            self.values = []
+
+        def emit(self, value):
+            self.values.append(value)
+
+    class StandIn:
+        pass
+
+    for name in ("update_progress", "update_detail_progress", "_update_progress_at",
+                 "_step_progress_locked", "progress_span", "mark_step_waiting",
+                 "_bring_setup_window_forward"):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+    obj = StandIn()
+    obj._progress_lock = threading.Lock()
+    obj._progress_spans = []
+    obj._progress_floor = 0.0
+    obj.progress_signal = Signal()
+    obj.step_progress_signal = Signal()
+    obj.step_progress_signal.emit = (
+        lambda value, how, sig=obj.step_progress_signal: sig.values.append((value, how)))
+    return obj
+
+
+def test_a_step_reports_within_its_share_and_never_back(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.2, 0.6):
+        h.update_progress(0.5)
+        assert h.progress_signal.values[-1] == pytest.approx(0.4)
+        h.update_progress(0.0)  # a nested step resetting itself
+        assert h.progress_signal.values[-1] == pytest.approx(0.4)
+        with h.progress_span(0.5, 1.0):
+            h.update_progress(0.5)
+            assert h.progress_signal.values[-1] == pytest.approx(0.2 + 0.4 * 0.75)
+    assert h.progress_signal.values[-1] == pytest.approx(0.6)
+    # Outside any step the bar is set as given, so end_operation can reset it.
+    h.update_progress(0.0)
+    assert h.progress_signal.values[-1] == 0.0
+
+
+def test_a_helpers_own_progress_needs_a_detail_span(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 0.5):
+        h.update_detail_progress(1.0)  # an icon download in passing
+        assert max(h.progress_signal.values) == 0.0
+        with h.progress_span(0.1, 0.3, detail=True):
+            h.update_detail_progress(0.5)
+            assert h.progress_signal.values[-1] == pytest.approx(0.1)
+
+
+def test_one_click_downloads_nothing_before_the_bar_has_shares(ali):
+    # The patcher files download first; outside any span, their percent was
+    # the whole bar's.
+    src = inspect.getsource(ali.AffinityInstallerGUI._one_click_setup_thread)
+    before = src.split("self.ensure_patcher_files()")[0]
+    assert "with self.progress_span(" in before
+
+
+def test_the_affinity_install_has_a_share_of_its_own(ali):
+    # Its helpers download (WinRT facades, the plugin loader); without a span
+    # each download filled the bar, and the installer's own download got none.
+    gui = ali.AffinityInstallerGUI
+    assert "with self.progress_span(" in inspect.getsource(gui._run_installation_entry)
+    assert "detail=True" in inspect.getsource(gui._download_then_install)
+
+
+def test_the_step_bar_follows_the_innermost_step_and_says_how(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.2, 0.6):
+        h.update_progress(0.5)
+        assert h.step_progress_signal.values[-1] == (pytest.approx(0.5), "steps")
+        with h.progress_span(0.5, 1.0, detail=True):
+            # A new step starts its own bar at 0, whatever the overall bar says.
+            assert h.step_progress_signal.values[-1] == (pytest.approx(0.0), "measured")
+            h.update_detail_progress(0.5)
+            assert h.step_progress_signal.values[-1] == (pytest.approx(0.5), "measured")
+            assert h.progress_signal.values[-1] == pytest.approx(0.2 + 0.4 * 0.75)
+        with h.progress_span(0.9, 1.0, expected_seconds=60):
+            assert h.step_progress_signal.values[-1][1] == "estimate"
+    # No step running: the step bar is hidden.
+    assert h.step_progress_signal.values[-1] == (0.0, "")
+
+
+def test_the_step_bar_goes_back_to_the_enclosing_step_when_a_part_ends(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 1.0):
+        with h.progress_span(0.0, 0.4, expected_seconds=60):
+            pass
+        # Not the finished part's 100%, which would stay up while the enclosing
+        # step works on until its next report.
+        assert h.step_progress_signal.values[-1] == (pytest.approx(0.4), "steps")
+
+
+def test_a_step_waiting_for_the_user_says_so_and_does_not_creep(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 0.5, waiting=True):
+        assert h.step_progress_signal.values[-1] == (0.0, "waiting")
+        assert "waiting for you" in ali.AffinityInstallerGUI.STEP_PROGRESS_TEXT["waiting"]
+
+
+def _setup_watch(ali, h, windows, monkeypatch):
+    h.SETUP_WAITING_TEXT = ali.AffinityInstallerGUI.SETUP_WAITING_TEXT
+    h.texts, h.logs, activated = [], [], []
+    h.update_progress_text = h.texts.append
+    h.log = lambda msg, kind="info": h.logs.append(msg)
+    h._find_setup_window = lambda: windows.pop(0) if windows else None
+    monkeypatch.setattr(ali.subprocess, "run", lambda cmd, **kw: activated.append(cmd))
+    return activated
+
+
+def test_the_step_says_it_waits_only_once_the_setup_window_is_there(ali, monkeypatch):
+    h = _progress_harness(ali)
+    activated = _setup_watch(ali, h, [None, "42"], monkeypatch)
+    with h.progress_span(0.05, 0.35):
+        assert h.step_progress_signal.values[-1][1] == "steps"
+        h._bring_setup_window_forward(threading.Event(), h._progress_spans[-1])
+        assert h.step_progress_signal.values[-1] == (0.0, "waiting")
+    assert h.texts == [h.SETUP_WAITING_TEXT]
+    assert activated == [["xdotool", "windowactivate", "42"]]
+
+
+def test_a_setup_that_has_ended_is_not_marked_waiting(ali, monkeypatch):
+    h = _progress_harness(ali)
+    activated = _setup_watch(ali, h, ["42"], monkeypatch)
+    stop = threading.Event()
+    stop.set()
+    with h.progress_span(0.05, 0.35):
+        h._bring_setup_window_forward(stop, h._progress_spans[-1])
+        assert h.step_progress_signal.values[-1][1] == "steps"
+    assert h.texts == [] and activated == []
+
+
+def _session_standin(ali, pids):
+    class StandIn:
+        end_install_session = inspect.getattr_static(ali.AffinityInstallerGUI, "end_install_session")
+    obj = StandIn()
+    obj.stopped, obj.logs = [], []
+    obj._prefix_wine_pids = lambda: pids
+    obj.stop_prefix_wine_processes = lambda **kw: obj.stopped.append(kw)
+    obj.log = lambda msg, kind="info": obj.logs.append(msg)
+    return obj
+
+
+def test_an_install_ends_the_wine_session_it_started(ali):
+    obj = _session_standin(ali, [os.getpid()])
+    obj.end_install_session()
+    assert len(obj.stopped) == 1
+
+
+def test_an_install_leaves_a_running_affinity_alone(ali, tmp_path):
+    exe = tmp_path / "Affinity.exe"
+    shutil.copy("/bin/sleep", exe)
+    child = subprocess.Popen([str(exe), "5"])
+    try:
+        for _ in range(100):
+            if Path(f"/proc/{child.pid}/comm").read_text().strip() == "Affinity.exe":
+                break
+            time.sleep(0.01)
+        obj = _session_standin(ali, [child.pid])
+        obj.end_install_session()
+        assert obj.stopped == []
+    finally:
+        child.kill()
+
+
+def test_the_setup_window_is_recognized_by_its_prefix(ali, tmp_path, monkeypatch):
+    class StandIn:
+        _process_in_prefix = inspect.getattr_static(ali.AffinityInstallerGUI, "_process_in_prefix")
+    obj = StandIn()
+    obj.directory = str(tmp_path)
+    monkeypatch.setenv("WINEPREFIX", str(tmp_path) + "/")
+    child = subprocess.Popen(["sh", "-c", "echo ready; exec sleep 5"],
+                             env=dict(os.environ), stdout=subprocess.PIPE)
+    try:
+        child.stdout.readline()  # started: its environment is the one given
+        assert obj._process_in_prefix(child.pid)
+        obj.directory = str(tmp_path / "other")
+        assert not obj._process_in_prefix(child.pid)
+    finally:
+        child.kill()
+
+
+def test_a_silent_step_creeps_but_does_not_finish(ali):
+    h = _progress_harness(ali)
+    with h.progress_span(0.0, 1.0, expected_seconds=1):
+        time.sleep(2.3)
+        crept = h.progress_signal.values[-1]
+    assert 0.5 < crept < 0.95
+    assert h.progress_signal.values[-1] == 1.0
+
+
+def test_the_slow_verbs_get_the_most_of_the_bar(ali):
+    names = [name for name, _ in ali.WINETRICKS_COMPONENTS]
+    assert set(names) <= set(ali.WINETRICKS_EXPECTED_SECONDS)
+    times = ali.WINETRICKS_EXPECTED_SECONDS
+    assert times["dotnet48"] > sum(t for n, t in times.items() if n != "dotnet48")
+
+
+def test_winefix_guard_off_in_a_new_settings_file(ali, tmp_path):
+    assert ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert (tmp_path / "apl/config/winefix.toml").read_text() == "[patches]\nbezier_split_guard = false\n"
+
+
+def test_winefix_guard_off_keeps_the_rest_and_the_line_ends(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_bytes(b"[patches]\r\n# Guard\r\nbezier_split_guard = true\r\nwiden_stub_fix = true\r\n")
+    assert ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_bytes() == (
+        b"[patches]\r\n# Guard\r\nbezier_split_guard = false\r\nwiden_stub_fix = true\r\n")
+    assert not ali.winefix_disable_bezier_split_guard(tmp_path)
+
+
+def test_winefix_guard_off_added_when_the_key_is_missing(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[patches]\nwiden_stub_fix = true\n\n[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_text() == (
+        "[patches]\nbezier_split_guard = false\nwiden_stub_fix = true\n\n"
+        "[crash-fixes]\npin_plugin_host = true\n")
+    config.write_text("[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\nbezier_split_guard = false\n"

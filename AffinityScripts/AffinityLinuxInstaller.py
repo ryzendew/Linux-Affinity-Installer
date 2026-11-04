@@ -23,6 +23,8 @@ import tempfile
 import queue
 from pathlib import Path
 import time
+import math
+import contextlib
 import signal
 import shlex
 
@@ -49,6 +51,21 @@ WINETRICKS_COMPONENTS = [
     ("tahoma", "Tahoma Font"),
     ("renderer=vulkan", "Vulkan Renderer"),
 ]
+
+# Roughly how long each verb takes, in seconds, for the progress bar: each gets
+# a share of it in proportion, and creeps through that share while it runs,
+# since winetricks says nothing until it is done. Measured on a fresh 11.21
+# prefix on a fast machine (dotnet48 246 s, which includes .NET 4.0; the rest
+# 6-11 s), rounded up for slower ones.
+WINETRICKS_EXPECTED_SECONDS = {
+    "dotnet48": 360,
+    "corefonts": 10,
+    "vcrun2022": 20,
+    "msxml3": 15,
+    "msxml6": 10,
+    "tahoma": 8,
+    "renderer=vulkan": 8,
+}
 
 # Side column (Quick Start / Troubleshooting) sizing. The floor keeps a column
 # wide enough for its icon plus a few words of label; MIN_WINDOW_WIDTH is the
@@ -291,6 +308,13 @@ def kept_installers_dir():
     return Path(base) / "AffinityOnLinux" / "installers"
 
 
+# The WebView2 Runtime installer, kept after its first download for every later
+# prefix (it is the same 180 MB file each time).
+def webview2_cache_file():
+    base = os.environ.get("XDG_CACHE_HOME", "").strip() or os.path.join(Path.home(), ".cache")
+    return Path(base) / "AffinityOnLinux" / "webview2" / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+
+
 def pe_file_version(path):
     """The FileVersion string in a PE's version resource, or None."""
     try:
@@ -444,6 +468,41 @@ def source_repo():
     return os.environ.get("AFFINITY_MANAGER_REPO", "").strip().rstrip("/") or SOURCE_REPO
 
 
+def winefix_disable_bezier_split_guard(install_dir):
+    """Turn off WineFix's bezier split guard in its settings file, creating the
+    file if WineFix has not written one yet. Returns True if the file changed.
+
+    The guard finds the function it hooks by a prologue byte pattern, and in
+    the Wine builds this installer offers (and in plain Wine 11.21) the first
+    match is another function: in ours, the fill triangulation, which then
+    returned at once with nothing built. Affinity drew no fills, logged
+    "Edge not found" and faulted, and a fault inside the deferred outline work
+    left a lock held and hung the next draw of that path. These builds carry
+    their own limit on bezier splitting, so the guard has nothing to add.
+    WineFix keeps a value it finds in the file and fills in defaults for the
+    rest."""
+    config = Path(install_dir) / "apl" / "config" / "winefix.toml"
+    line = "bezier_split_guard = false"
+    if not config.exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(f"[patches]\n{line}\n")
+        return True
+    # newline="" keeps a CRLF file CRLF.
+    with open(config, newline="") as f:
+        text = f.read()
+    new, count = re.subn(r"(?m)^bezier_split_guard\s*=\s*\w+[ \t]*(?=\r?$)", line, text)
+    if not count:
+        if re.search(r"(?m)^\[patches\][ \t]*\r?$", text):
+            new = re.sub(r"(?m)^\[patches\][ \t]*(\r?)$", lambda m: f"[patches]{m.group(1)}\n{line}{m.group(1)}", text, count=1)
+        else:
+            new = text + ("" if text.endswith("\n") or not text else "\n") + f"[patches]\n{line}\n"
+    if new == text:
+        return False
+    with open(config, "w", newline="") as f:
+        f.write(new)
+    return True
+
+
 def source_branch():
     return os.environ.get("AFFINITY_MANAGER_BRANCH", "").strip() or SOURCE_BRANCH
 
@@ -467,15 +526,18 @@ HANDLER_SHA256 = "5bd31facbe433a884afab9dd6861d5094726055f3c1706a4d001a800e30ed9
 # fork that carries the patches' upstream pull request.
 WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae934853"
 
-# The same patch set on Wine 11.19, offered as the fallback.
+# The same patch set on Wine 11.19, no longer offered but still installable.
 WINE_11_19_SHA256 = "637a0ec5ed8f225dd96c30796f9227f6f5a68ccc8e394a549391be7a6e9a626e"
 
-# Wine 11.20 with the full Affinity patch set, the default, pinned by content:
+# The same patch set on Wine 11.20, offered as the fallback.
+WINE_11_20_SHA256 = "e4b7c61e066e3269d3d3c464764a35e032e6a572555f88e7358cefaee4353684"
+
+# Wine 11.21 with the full Affinity patch set, the default, pinned by content:
 # the 11.16 release once went three weeks without eight fixes the local builds
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_20_SHA256 = "ce47d3f9350629cb67c0e5a3091a171e26d500eed98a8f422e6f0905867ffd31"
+WINE_11_21_SHA256 = "6b2d9059ea6df52623a5767afc2e0c5da7a7d256bae4bd658ceb9fda96b29408"
 
 # vkd3d-proton (Affinity's D3D12), pinned the same way. The installer used to
 # take whatever release was newest on GitHub, so new installs got each one the
@@ -1197,6 +1259,10 @@ class AffinityInstallerGUI(QMainWindow):
 
     log_signal = pyqtSignal(str, str)
     progress_signal = pyqtSignal(float)
+    # The current step's own progress (0-1) and how it is known: "measured"
+    # (a download's bytes), "estimate" (by the time the step usually takes),
+    # "steps" (its sub-steps done), or "" when no step is running.
+    step_progress_signal = pyqtSignal(float, str)
     progress_text_signal = pyqtSignal(str)
     operation_clock_signal = pyqtSignal(bool)
     show_message_signal = pyqtSignal(str, str, str)
@@ -1294,6 +1360,11 @@ class AffinityInstallerGUI(QMainWindow):
         self._button_spinner_map = {}
         self._last_clicked_button = None
         self._operation_button = None
+        # Shares of the progress bar handed to the steps running now
+        # (progress_span); the bar never moves back while any is open.
+        self._progress_lock = threading.Lock()
+        self._progress_spans = []
+        self._progress_floor = 0.0
 
         self.log_file_path = Path.home() / "AffinitySetup.log"
         self.log_file = None
@@ -1302,6 +1373,7 @@ class AffinityInstallerGUI(QMainWindow):
 
         self.log_signal.connect(self._log_safe)
         self.progress_signal.connect(self._update_progress_safe)
+        self.step_progress_signal.connect(self._update_step_progress_safe)
         self.progress_text_signal.connect(self._update_progress_text_safe)
         self.operation_clock_signal.connect(self._operation_clock_safe)
         self.show_message_signal.connect(self._show_message_safe)
@@ -1674,8 +1746,15 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("WebView2 Runtime:", "info")
             if self.check_webview2_installed():
                 self.log(f"  Microsoft Edge WebView2 Runtime: ✓ Installed", "success")
+            elif not self.affinity_v3_exe_path().exists():
+                # It is installed with Affinity v3 (ensure_webview2_runtime), the
+                # step after this summary: missing here is not yet, not a fault.
+                self.log("  Microsoft Edge WebView2 Runtime: installed with Affinity "
+                         "(for its Help pages)", "info")
             else:
-                self.log(f"  Microsoft Edge WebView2 Runtime: ✗ Not installed", "error")
+                self.log("  Microsoft Edge WebView2 Runtime: ✗ Not installed — "
+                         "Affinity's Help stays blank; add it with "
+                         "'WebView2 Runtime (v3)'", "error")
 
         self.log("", "info")
 
@@ -3679,13 +3758,45 @@ class AffinityInstallerGUI(QMainWindow):
         progress_container.setSpacing(12)
         progress_container.setContentsMargins(0, 0, 0, 0)
 
+        # Two bars, each saying what it measures: the whole operation, which
+        # never moves back, and the step running now, which starts again at
+        # each step. The step bar is hidden while no step is running.
+        bars = QVBoxLayout()
+        bars.setSpacing(4)
+        bars.setContentsMargins(0, 0, 0, 0)
+        self.overall_caption = QLabel("")
+        self.overall_caption.setObjectName("progressTimerLabel")
+        self.overall_caption.setToolTip(
+            "How far through the whole operation you are, from the time "
+            "each part of it usually takes. It never moves back."
+        )
+        bars.addWidget(self.overall_caption)
         self.progress = QProgressBar()
         self.progress.setObjectName("progressBar")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.progress.setTextVisible(False)
         self.progress.setFixedHeight(8)
-        progress_container.addWidget(self.progress, stretch=1)
+        bars.addWidget(self.progress)
+        self.step_caption = QLabel("")
+        self.step_caption.setObjectName("progressTimerLabel")
+        self.step_caption.setToolTip(
+            "The step running now. Downloads show real progress; steps that "
+            "report nothing while they run are estimated from the time they "
+            "usually take, so a full bar there does not mean the step is done."
+        )
+        bars.addWidget(self.step_caption)
+        self.step_progress = QProgressBar()
+        self.step_progress.setObjectName("progressBar")
+        self.step_progress.setRange(0, 100)
+        self.step_progress.setValue(0)
+        self.step_progress.setTextVisible(False)
+        self.step_progress.setFixedHeight(4)
+        bars.addWidget(self.step_progress)
+        self.overall_caption.hide()
+        self.step_caption.hide()
+        self.step_progress.hide()
+        progress_container.addLayout(bars, stretch=1)
 
         self.cancel_btn = QPushButton("✕")
         self.cancel_btn.setObjectName("cancelButton")
@@ -4583,12 +4694,161 @@ class AffinityInstallerGUI(QMainWindow):
             pass
 
     def update_progress(self, value):
-        """Update progress bar (thread-safe via signal)"""
+        """Update progress bar (thread-safe via signal). Inside progress_span()
+        the value is the current step's own 0-1, placed within its share."""
+        self._update_progress_at(None, value)
+
+    def update_detail_progress(self, value):
+        """Progress a helper reports about its own work (a download's bytes, a
+        winetricks download's percent). It moves the bar only when the caller
+        opened a span for that helper (progress_span(..., detail=True)), or
+        when no step is running: a helper called in passing, such as an icon
+        download, would otherwise fill the whole step it happens to be in."""
+        with self._progress_lock:
+            if self._progress_spans and not self._progress_spans[-1][2]:
+                return
+        self._update_progress_at(None, value)
+
+    def _update_progress_at(self, depth, value, span=None):
+        """Place value (0-1) through the outermost `depth` spans (all when
+        None). While a span is open the bar only moves forward: steps that
+        reset to 0 on their own no longer send it back. With `span`, nothing
+        happens unless that span is still the one at `depth` (a late tick from
+        a step that has just ended)."""
+        try:
+            value = min(max(float(value), 0.0), 1.0)
+        except (TypeError, ValueError):
+            return
+        with self._progress_lock:
+            if span is not None and (len(self._progress_spans) < depth
+                                     or self._progress_spans[depth - 1] is not span):
+                return
+            spans = self._progress_spans if depth is None else self._progress_spans[:depth]
+            for lo, hi, *_rest in reversed(spans):
+                value = lo + value * (hi - lo)
+            step = None
+            if self._progress_spans:
+                value = max(value, self._progress_floor)
+                self._progress_floor = value
+                if depth is None or depth == len(self._progress_spans):
+                    step = self._step_progress_locked(value)
         self.progress_signal.emit(value)
+        if step is not None:
+            self.step_progress_signal.emit(*step)
+
+    def mark_step_waiting(self, span):
+        """The step `span` now waits for the user (see progress_span's
+        waiting). Nothing happens once that step has ended."""
+        with self._progress_lock:
+            if not self._progress_spans or self._progress_spans[-1] is not span:
+                return
+            self._progress_spans[-1] = span[:4] + (True,)
+            step = self._step_progress_locked(self._progress_floor)
+        if step is not None:
+            self.step_progress_signal.emit(*step)
+
+    def _step_progress_locked(self, value):
+        """The innermost step's own share of the bar at overall `value`, read
+        back from the overall value so the two bars always agree, and how it
+        is known. None when the step has no share. Call with the lock held."""
+        step_lo, step_hi = 0.0, 1.0
+        for lo, hi, *_rest in reversed(self._progress_spans):
+            step_lo, step_hi = lo + step_lo * (hi - lo), lo + step_hi * (hi - lo)
+        _lo, _hi, detail, expected, waiting = self._progress_spans[-1]
+        how = ("waiting" if waiting else "measured" if detail
+               else "estimate" if expected else "steps")
+        if step_hi <= step_lo:
+            return None
+        return (min(max((value - step_lo) / (step_hi - step_lo), 0.0), 1.0), how)
+
+    @contextlib.contextmanager
+    def progress_span(self, lo, hi, expected_seconds=None, detail=False, waiting=False):
+        """Give the enclosed step the share lo..hi (0-1) of the current scale.
+
+        expected_seconds: the step reports nothing while it runs (a winetricks
+        verb, an unpack), so creep through the share by time instead: about
+        63% of it at the expected time, slowing toward 95% if it runs long,
+        so the bar keeps moving without claiming the step is done.
+        detail: let the helper's own progress (update_detail_progress) fill
+        the share, as for a download.
+        waiting: the step waits for the user in another program's window (the
+        Affinity setup); the step bar says so and shows no percentage.
+        """
+        with self._progress_lock:
+            if not self._progress_spans:
+                self._progress_floor = 0.0
+            span = (lo, hi, detail, expected_seconds, waiting)
+            self._progress_spans.append(span)
+            depth = len(self._progress_spans)
+        self._update_progress_at(depth, 0.0)
+        stop = threading.Event()
+        if expected_seconds:
+            started = time.monotonic()
+
+            def creep():
+                while not stop.wait(1.0):
+                    elapsed = time.monotonic() - started
+                    self._update_progress_at(
+                        depth, 0.95 * (1.0 - math.exp(-elapsed / expected_seconds)), span
+                    )
+
+            threading.Thread(target=creep, daemon=True).start()
+        try:
+            yield
+        finally:
+            stop.set()
+            self._update_progress_at(depth, 1.0)
+            with self._progress_lock:
+                del self._progress_spans[depth - 1:]
+                done = not self._progress_spans
+                step = None if done else self._step_progress_locked(self._progress_floor)
+            if done:
+                self.step_progress_signal.emit(0.0, "")
+            elif step is not None:
+                # The enclosing step is the current one again. Show its own
+                # progress: the 100% of the part that just ended would stay up
+                # until the enclosing step next reports, which can be minutes.
+                self.step_progress_signal.emit(*step)
 
     def _update_progress_safe(self, value):
         """Thread-safe progress update handler (called from main thread)"""
         self.progress.setValue(int(value * 100))
+        if not hasattr(self, "overall_caption"):
+            return
+        if self.operation_in_progress and value > 0:
+            what = self.current_operation or "the whole operation"
+            self.overall_caption.setText(f"Overall: {int(value * 100)}% of {what}")
+            self.overall_caption.show()
+        else:
+            self.overall_caption.hide()
+
+    STEP_PROGRESS_TEXT = {
+        "measured": "This step: {p}% downloaded",
+        "estimate": "This step: about {p}% (estimated from the time it usually takes)",
+        "steps": "This step: {p}% of its parts done",
+        "waiting": "This step: waiting for you in Affinity's setup window",
+    }
+
+    def _update_step_progress_safe(self, value, how):
+        """The current step's bar (main thread). Hidden when no step runs."""
+        if not hasattr(self, "step_progress"):
+            return
+        if not how or not self.operation_in_progress:
+            self.step_caption.hide()
+            self.step_progress.hide()
+            return
+        percent = int(value * 100)
+        # No percentage while the step waits for the user: a busy bar.
+        if how == "waiting":
+            self.step_progress.setRange(0, 0)
+        else:
+            self.step_progress.setRange(0, 100)
+        self.step_progress.setValue(percent)
+        self.step_caption.setText(
+            self.STEP_PROGRESS_TEXT.get(how, "This step: {p}%").format(p=percent)
+        )
+        self.step_caption.show()
+        self.step_progress.show()
 
     def _update_progress_text_safe(self, text):
         """Thread-safe progress text update handler (called from main thread)"""
@@ -5383,20 +5643,43 @@ class AffinityInstallerGUI(QMainWindow):
         # Create button group to ensure only one radio button is selected at a time
         button_group = QButtonGroup(dialog)
 
-        # Wine 11.20 option - clean frame with radio button and description (Recommended)
+        # Wine 11.21 option - clean frame with radio button and description (Recommended)
+        wine_1121_frame = QFrame()
+        wine_1121_frame.setObjectName("optionFrame")
+        wine_1121_layout = QVBoxLayout(wine_1121_frame)
+        wine_1121_layout.setContentsMargins(12, 10, 12, 10)
+        wine_1121_layout.setSpacing(6)
+        wine_1121_radio = QRadioButton("Wine 11.21 (Recommended)")
+        wine_1121_radio.setChecked(True)
+        wine_1121_radio.setSizePolicy(
+            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
+        )
+        wine_1121_layout.addWidget(wine_1121_radio)
+        wine_1121_desc = QLabel(
+            "Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
+        )
+        wine_1121_desc.setObjectName("optionDescription")
+        wine_1121_desc.setWordWrap(True)
+        wine_1121_desc.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
+        )
+        wine_1121_layout.addWidget(wine_1121_desc)
+        options_layout.addWidget(wine_1121_frame)
+        button_group.addButton(wine_1121_radio, 0)
+
+        # Wine 11.20 option - clean frame with radio button and description
         wine_1120_frame = QFrame()
         wine_1120_frame.setObjectName("optionFrame")
         wine_1120_layout = QVBoxLayout(wine_1120_frame)
         wine_1120_layout.setContentsMargins(12, 10, 12, 10)
         wine_1120_layout.setSpacing(6)
-        wine_1120_radio = QRadioButton("Wine 11.20 (Recommended)")
-        wine_1120_radio.setChecked(True)
+        wine_1120_radio = QRadioButton("Wine 11.20")
         wine_1120_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
         )
         wine_1120_layout.addWidget(wine_1120_radio)
         wine_1120_desc = QLabel(
-            "Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
+            "Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues."
         )
         wine_1120_desc.setObjectName("optionDescription")
         wine_1120_desc.setWordWrap(True)
@@ -5405,30 +5688,7 @@ class AffinityInstallerGUI(QMainWindow):
         )
         wine_1120_layout.addWidget(wine_1120_desc)
         options_layout.addWidget(wine_1120_frame)
-        button_group.addButton(wine_1120_radio, 0)
-
-        # Wine 11.19 option - clean frame with radio button and description
-        wine_1119_frame = QFrame()
-        wine_1119_frame.setObjectName("optionFrame")
-        wine_1119_layout = QVBoxLayout(wine_1119_frame)
-        wine_1119_layout.setContentsMargins(12, 10, 12, 10)
-        wine_1119_layout.setSpacing(6)
-        wine_1119_radio = QRadioButton("Wine 11.19")
-        wine_1119_radio.setSizePolicy(
-            QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
-        )
-        wine_1119_layout.addWidget(wine_1119_radio)
-        wine_1119_desc = QLabel(
-            "Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues."
-        )
-        wine_1119_desc.setObjectName("optionDescription")
-        wine_1119_desc.setWordWrap(True)
-        wine_1119_desc.setSizePolicy(
-            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Minimum
-        )
-        wine_1119_layout.addWidget(wine_1119_desc)
-        options_layout.addWidget(wine_1119_frame)
-        button_group.addButton(wine_1119_radio, 1)
+        button_group.addButton(wine_1120_radio, 1)
 
         # Add scroll area to main layout with stretch factor
         main_layout.addWidget(scroll_area, 1)
@@ -5468,10 +5728,10 @@ class AffinityInstallerGUI(QMainWindow):
         # Get result
         result = dialog.exec()
         if result == QDialog.DialogCode.Accepted:
-            if wine_1120_radio.isChecked():
-                self.question_dialog_response = "Wine 11.20 (Recommended)"
-            elif wine_1119_radio.isChecked():
-                self.question_dialog_response = "Wine 11.19"
+            if wine_1121_radio.isChecked():
+                self.question_dialog_response = "Wine 11.21 (Recommended)"
+            elif wine_1120_radio.isChecked():
+                self.question_dialog_response = "Wine 11.20"
         else:
             # User cancelled - return "Cancel" to match expected format
             self.question_dialog_response = "Cancel"
@@ -5720,7 +5980,7 @@ class AffinityInstallerGUI(QMainWindow):
         return self.get_wine_dir() / "bin" / binary
 
     def get_current_wine_version(self):
-        """Get the current ElementalWarrior Wine version (such as 11.19 or 11.20)"""
+        """Get the current ElementalWarrior Wine version (such as 11.20 or 11.21)"""
         # Try regular wine first
         wine = self.get_wine_path("wine")
         wine_staging = self.get_wine_path("wine-staging")
@@ -5741,7 +6001,7 @@ class AffinityInstallerGUI(QMainWindow):
                                 return "9.14"
                             elif version.startswith("10."):
                                 return "10.10"
-                            elif version in ("11.16", "11.18", "11.19", "11.20"):
+                            elif version in ("11.16", "11.18", "11.19", "11.20", "11.21"):
                                 return version
                             elif version.startswith("11."):
                                 return version
@@ -6655,7 +6915,7 @@ class AffinityInstallerGUI(QMainWindow):
             self.log(
                 f"winetricks is running on Wine {major}.x. Wine 11+ new WoW64 mode is "
                 "known to hang the .NET installers — if a component stalls, switch "
-                "to the other Wine version (11.19 / 11.20) and try again.",
+                "to the other Wine version (11.20 / 11.21) and try again.",
                 "warning",
             )
         return major
@@ -6744,6 +7004,25 @@ class AffinityInstallerGUI(QMainWindow):
                 continue
         if lines:
             self.log("  Still running when it was stopped:\n" + "\n".join(lines[:15]), "info")
+
+    def end_install_session(self):
+        """Stop the Wine processes an install leaves running in the prefix.
+
+        Affinity starts its own session at launch. These left the manager
+        reporting leftover processes after every install; until 2026-11 the
+        AffinityHook run after the plugin loader install ended them with
+        wineserver -k, as a side effect. Leaves the prefix alone when Affinity
+        or its hook is running in it."""
+        for pid in self._prefix_wine_pids():
+            try:
+                with open(f"/proc/{pid}/comm") as f:
+                    comm = f.read().strip()
+            except OSError:
+                continue
+            if comm in ("Affinity.exe", "AffinityHook.ex", "AffinityHook.exe"):
+                self.log("Affinity is running in the prefix: its Wine session is left as it is", "info")
+                return
+        self.stop_prefix_wine_processes(reason="the install is done; Affinity starts its own session")
 
     def _prefix_wine_pids(self):
         """PIDs of processes whose environment points at our WINEPREFIX.
@@ -6983,7 +7262,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(".NET Framework 4.8 is not installed in the Wine prefix.", "error")
         self.log("Affinity's SetupUI.exe crashes without it, which matches the JIT/debugger failures seen on Ubuntu.", "info")
         if self.is_ubuntu_family_distro():
-            self.log("Ubuntu-family systems use Wine 11.20 by default; if winetricks stalls on the Wine 11 new WoW64 path, switch to Wine 11.19 and try again.", "info")
+            self.log("Ubuntu-family systems use Wine 11.21 by default; if winetricks stalls on the Wine 11 new WoW64 path, switch to Wine 11.20 and try again.", "info")
         self.log("Aborting before launching the Affinity installer.", "info")
         return False
 
@@ -7064,6 +7343,10 @@ class AffinityInstallerGUI(QMainWindow):
             env["APT_LISTCHANGES_FRONTEND"] = "none"
             env["LANG"] = "C"  # Use C locale to avoid encoding issues
             env["LC_ALL"] = "C"
+            # The installer shows its own progress: Wine's "configuration is
+            # being updated" window is a stray one over it. Builds from
+            # 11.21-r4 / 11.20-r6 honor this; older ones ignore it.
+            env.setdefault("WINEBOOT_HIDE_DIALOG", "1")
 
             # Check if this is a sudo command
             is_sudo = (
@@ -7353,6 +7636,10 @@ class AffinityInstallerGUI(QMainWindow):
             env["APT_LISTCHANGES_FRONTEND"] = "none"
             env["LANG"] = "C"  # Use C locale to avoid encoding issues
             env["LC_ALL"] = "C"
+            # The installer shows its own progress: Wine's "configuration is
+            # being updated" window is a stray one over it. Builds from
+            # 11.21-r4 / 11.20-r6 honor this; older ones ignore it.
+            env.setdefault("WINEBOOT_HIDE_DIALOG", "1")
 
             # Unset SUDO_ASKPASS if this is a sudo command
             is_sudo = (
@@ -7390,6 +7677,7 @@ class AffinityInstallerGUI(QMainWindow):
             next_probe = started + probe_every
             last_activity = activity_probe() if activity_probe else None
             quiet_noted = False
+            exited_at = None
 
             while True:
                 if self.cancel_event.is_set():
@@ -7401,6 +7689,15 @@ class AffinityInstallerGUI(QMainWindow):
                     line = lines.get(timeout=0.5)
                 except queue.Empty:
                     now = time.monotonic()
+                    # The command has exited but its output pipe stays open:
+                    # a wineserver or Wine service it started inherited it
+                    # (a `wine start /wait` that brought the prefix up), and
+                    # those run on. Stop reading a few seconds after the exit
+                    # rather than wait for them.
+                    if process.poll() is not None:
+                        exited_at = exited_at or now
+                        if now - exited_at >= 5:
+                            break
                     if activity_probe and now >= next_probe:
                         next_probe = now + probe_every
                         try:
@@ -7560,9 +7857,13 @@ class AffinityInstallerGUI(QMainWindow):
         return win.replace("/", "\\")
 
     # Wine's own background processes, which never count as an installer.
+    # Services that may run beside the WebView2 setup without being part of
+    # it. mscorsvw.exe is .NET's native-image service, which the ngen step just
+    # before WebView2 leaves running: counted as setup work, it kept the wait
+    # from ever releasing, and the install sat for the 1-hour stall timeout.
     WINE_SERVICE_EXES = {"services.exe", "winedevice.exe", "svchost.exe", "plugplay.exe",
                          "rpcss.exe", "lsass.exe", "explorer.exe", "start.exe",
-                         "conhost.exe", "wineboot.exe"}
+                         "conhost.exe", "wineboot.exe", "mscorsvw.exe"}
 
     def _webview2_runtime_present(self):
         """msedgewebview2.exe is in place (it lives in a per-version folder)."""
@@ -9897,18 +10198,18 @@ class AffinityInstallerGUI(QMainWindow):
 
     def get_recommended_wine_version(self):
         """Return the preferred bundled Wine version for the current distro"""
-        return "11.20"
+        return "11.21"
 
     def get_wine_version_dialog_options(self):
         """Return Wine version labels and descriptions for UI prompts"""
         return [
             (
-                "Wine 11.20 (Recommended)",
-                "Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
+                "Wine 11.21 (Recommended)",
+                "Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes."
             ),
             (
-                "Wine 11.19",
-                "Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues."
+                "Wine 11.20",
+                "Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues."
             ),
         ]
 
@@ -9926,6 +10227,8 @@ class AffinityInstallerGUI(QMainWindow):
         """Map a dialog label back to an internal Wine version"""
         if not wine_choice:
             return None
+        if wine_choice.startswith("Wine 11.21"):
+            return "11.21"
         if wine_choice.startswith("Wine 11.20"):
             return "11.20"
         if wine_choice.startswith("Wine 11.19"):
@@ -9978,9 +10281,9 @@ class AffinityInstallerGUI(QMainWindow):
 
                         if total_size > 0:
                             percent = min(100, (downloaded * 100) // total_size)
-                            self.update_progress(percent / 100.0)
+                            self.update_detail_progress(percent / 100.0)
 
-                self.update_progress(1.0)
+                self.update_detail_progress(1.0)
                 return True
         except urllib.error.HTTPError as e:
             self.log(f"Download failed: HTTP {e.code} {e.reason}", "error")
@@ -10134,14 +10437,18 @@ class AffinityInstallerGUI(QMainWindow):
         """One-click setup in background thread"""
         self.start_operation("One-Click Full Setup")
 
-        # Ensure patcher files are available
-        self.ensure_patcher_files()
+        # The first percent of the bar. Without a share of its own, each
+        # patcher file's download filled the whole bar (75% a minute in) and
+        # then dropped back to 1% at step 1.
+        with self.progress_span(0.0, 0.01):
+            # Ensure patcher files are available
+            self.ensure_patcher_files()
 
-        # Ask which GPU to use (for multi GPUs systems)
-        gpus = self.detect_gpus()
-        gpu_config_file = Path(self.directory) / ".gpu_config"
-        if not gpu_config_file.exists() and len(gpus) > 2:
-            self.configure_gpu_selection()
+            # Ask which GPU to use (for multi GPUs systems)
+            gpus = self.detect_gpus()
+            gpu_config_file = Path(self.directory) / ".gpu_config"
+            if not gpu_config_file.exists() and len(gpus) > 2:
+                self.configure_gpu_selection()
 
         if self.check_cancelled():
             return
@@ -10165,7 +10472,7 @@ class AffinityInstallerGUI(QMainWindow):
                 "reports an unsupported graphics card.\n\n"
                 "Recommended: Yes.\n\n"
                 "About OpenCL: with Yes, Affinity can also use OpenCL "
-                "acceleration on the recommended Wine 11.20. On Wine 11.11 to "
+                "acceleration on the recommended Wine 11.21. On Wine 11.11 to "
                 "11.18 OpenCL stays switched off whichever you choose, because "
                 "there it made Affinity hang at startup; builds from 11.19 carry the fix.\n\n"
                 "You can change this later.",
@@ -10293,8 +10600,11 @@ class AffinityInstallerGUI(QMainWindow):
             return
 
         # Step 1: Detect distribution
+        # The bar follows the time the steps take: Wine's setup (its .NET above
+        # all) is nearly all of it; detection, dependencies and the settings
+        # and plugin files are seconds.
         self.update_progress_text("Step 1/4: Detecting Linux distribution...")
-        self.update_progress(0.05)
+        self.update_progress(0.01)
 
         if self.check_cancelled():
             return
@@ -10317,12 +10627,14 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text(
             "Step 2/4: Checking and installing system dependencies..."
         )
-        self.update_progress(0.15)
+        self.update_progress(0.02)
 
         if self.check_cancelled():
             return
 
-        if not self.check_dependencies():
+        with self.progress_span(0.02, 0.06):
+            dependencies_ok = self.check_dependencies()
+        if not dependencies_ok:
             self.log(
                 "Dependency check failed. Please resolve issues and try again.", "error"
             )
@@ -10349,7 +10661,7 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Step 3: Setup Wine environment (this includes winetricks dependencies via configure_wine)
         self.update_progress_text("Step 3/4: Setting up Wine environment...")
-        self.update_progress(0.40)
+        self.update_progress(0.06)
 
         if self.check_cancelled():
             return
@@ -10358,16 +10670,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.20 (Recommended) - Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
-            "• Wine 11.19 - Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues.\n\n"
+            "• Wine 11.21 (Recommended) - Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
+            "• Wine 11.20 - Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues.\n\n"
             "Note: You can switch versions later by running 'Setup Wine Environment' again.",
-            ["Wine 11.20 (Recommended)", "Wine 11.19"],
+            ["Wine 11.21 (Recommended)", "Wine 11.20"],
         )
 
-        if wine_version == "Wine 11.20 (Recommended)":
+        if wine_version == "Wine 11.21 (Recommended)":
+            wine_version_choice = "11.21"
+        elif wine_version == "Wine 11.20":
             wine_version_choice = "11.20"
-        elif wine_version == "Wine 11.19":
-            wine_version_choice = "11.19"
         else:
             self.log("Wine setup cancelled", "warning")
             self.end_operation()
@@ -10377,7 +10689,9 @@ class AffinityInstallerGUI(QMainWindow):
         # Wine download failed. Its return value used to be discarded, so a failed
         # download only appeared in the log while the flow carried on to DPI
         # configuration and beyond against a prefix that has no Wine in it.
-        if not self.setup_wine(wine_version_choice):
+        with self.progress_span(0.06, 0.95):
+            wine_ok = self.setup_wine(wine_version_choice)
+        if not wine_ok:
             if not self.check_cancelled():
                 self.log("Wine setup failed; stopping here", "error")
                 self.show_message(
@@ -10404,13 +10718,14 @@ class AffinityInstallerGUI(QMainWindow):
 
         # Step 4: Install Affinity v3 settings to enable settings saving
         self.update_progress_text("Step 4/5: Installing Affinity v3 settings...")
-        self.update_progress(0.80)
+        self.update_progress(0.95)
 
         if self.check_cancelled():
             return
 
         self.log("Installing Affinity v3 settings files...", "info")
-        self._install_affinity_settings_thread()
+        with self.progress_span(0.95, 0.97, expected_seconds=5):
+            self._install_affinity_settings_thread()
 
         if self.check_cancelled():
             return
@@ -10419,7 +10734,7 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text(
             "Step 5/5: Installing AffinityPluginLoader + WineFix..."
         )
-        self.update_progress(0.90)
+        self.update_progress(0.97)
 
         if self.check_cancelled():
             return
@@ -10429,7 +10744,8 @@ class AffinityInstallerGUI(QMainWindow):
         )
         if install_dir.exists():
             self.log("\nInstalling AffinityPluginLoader + WineFix...", "info")
-            self._install_affinity_plugin_loader_thread(standalone=False)
+            with self.progress_span(0.97, 1.0, expected_seconds=10):
+                self._install_affinity_plugin_loader_thread(standalone=False)
         else:
             self.log(
                 "\nSkipping AffinityPluginLoader install - Affinity not yet installed.",
@@ -10465,7 +10781,27 @@ class AffinityInstallerGUI(QMainWindow):
         self.prompt_affinity_install_signal.emit()
 
     def _prompt_affinity_install(self):
-        """Prompt user to install an Affinity application"""
+        """Prompt user to install an Affinity application.
+
+        Wine's setup and the Affinity install it offers are one install, timed
+        as one: the clock keeps running across these questions, less the time
+        they wait for an answer, instead of stopping at the end of the Wine
+        setup and starting again for Affinity."""
+        clock = getattr(self, "_clock_settle", None)
+        if clock is not None:
+            clock.stop()
+        asked = time.monotonic()
+        try:
+            self._ask_and_install_affinity()
+        finally:
+            if clock is not None and self._clock_started is not None:
+                started, t0 = self._clock_started
+                self._clock_started = (started, t0 + (time.monotonic() - asked))
+                if not self.operation_in_progress:
+                    clock.start()  # nothing started: stop as usual
+
+    def _ask_and_install_affinity(self):
+        """The questions behind _prompt_affinity_install, and the install."""
         reply = QMessageBox.question(
             self,
             "Install Affinity now?",
@@ -10949,9 +11285,11 @@ class AffinityInstallerGUI(QMainWindow):
         """Download installer then run installation (runs in background)."""
         try:
             self.log(f"Downloading from: {download_url}", "info")
-            if not self.download_file(
-                download_url, installer_path_str, f"{display_name} installer"
-            ):
+            with self.progress_span(0.0, 0.2, detail=True):
+                downloaded = self.download_file(
+                    download_url, installer_path_str, f"{display_name} installer"
+                )
+            if not downloaded:
                 self.log(
                     "Download failed. Please try providing your own installer file.",
                     "error",
@@ -10966,7 +11304,7 @@ class AffinityInstallerGUI(QMainWindow):
                 return
             self.log(f"Download completed: {installer_path_str}", "success")
             # Proceed to install (will end operation in wrapper)
-            self._run_installation_entry(app_code, installer_path_str)
+            self._run_installation_entry(app_code, installer_path_str, start=0.2)
         except Exception as e:
             self.log(f"Error during download+install: {e}", "error")
             self.end_operation()
@@ -12624,15 +12962,20 @@ class AffinityInstallerGUI(QMainWindow):
         self.log(f"All dependencies installed for {distro_name}", "success")
         return True
 
-    def setup_wine(self, wine_version="11.20"):
+    def setup_wine(self, wine_version="11.21"):
         """Setup Wine environment - installs custom Wine with the Affinity patches
 
         Args:
-            wine_version: "11.20" (recommended) or "11.19", both with the full
+            wine_version: "11.21" (recommended) or "11.20", both with the full
                           patch set; "11.18" (login fix + performance patches)
                           is still installable but no longer offered
         """
         self.start_operation("Setting up Wine environment")
+        # The steps below share the bar by how long they take: the download a
+        # few percent, winetricks (.NET most of all) the rest. Closed before
+        # end_operation, so a standalone setup ends with the bar reset.
+        progress = contextlib.ExitStack()
+        progress.enter_context(self.progress_span(0.0, 1.0))
 
         try:
             # Check if cancelled at start
@@ -12691,7 +13034,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Create directory
             self.update_progress_text("Creating installation directory...")
-            self.update_progress(0.05)
+            self.update_progress(0.01)
             Path(self.directory).mkdir(parents=True, exist_ok=True)
             self.log("Installation directory created", "success")
 
@@ -12702,11 +13045,12 @@ class AffinityInstallerGUI(QMainWindow):
             wine_file = Path(self.directory) / wine_file_name
 
             self.update_progress_text(f"Downloading {wine_display_name}...")
-            self.update_progress(0.10)
             self.log(f"Downloading {wine_display_name}...", "info")
-            if not self.download_file(
-                wine_url, str(wine_file), f"{wine_display_name} binaries"
-            ):
+            with self.progress_span(0.02, 0.08, detail=True):
+                downloaded = self.download_file(
+                    wine_url, str(wine_file), f"{wine_display_name} binaries"
+                )
+            if not downloaded:
                 self.log(f"Failed to download {wine_display_name}", "error")
                 self.update_progress_text("Ready")
                 return False
@@ -12719,7 +13063,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Extract Wine
             self.update_progress_text("Extracting Wine binary...")
-            self.update_progress(0.50)
+            self.update_progress(0.08)
             self.log("Extracting Wine binary...", "info")
             try:
                 if archive_format == "gz":
@@ -12766,7 +13110,7 @@ class AffinityInstallerGUI(QMainWindow):
                 return False
 
             # Find and link Wine directory
-            self.update_progress(0.55)
+            self.update_progress(0.10)
             wine_dir = next((p for p in Path(self.directory).glob(wine_dir_pattern) if p.is_dir()), None)
             if wine_dir and wine_dir != Path(self.directory) / wine_dir_name:
                 target = Path(self.directory) / wine_dir_name
@@ -12779,7 +13123,7 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log("Wine symlink created", "success")
 
             # Verify Wine binary
-            self.update_progress(0.60)
+            self.update_progress(0.10)
             wine_binary = Path(self.directory) / wine_dir_name / "bin" / "wine"
             if not wine_binary.exists():
                 self.log("Wine binary not found", "error")
@@ -12793,7 +13137,7 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Download icons
             self.update_progress_text("Downloading application icons...")
-            self.update_progress(0.65)
+            self.update_progress(0.11)
             self.log("\nSetting up application icons...", "info")
             icons_dir = Path.home() / ".local" / "share" / "icons"
             icons_dir.mkdir(parents=True, exist_ok=True)
@@ -12825,7 +13169,7 @@ class AffinityInstallerGUI(QMainWindow):
             for idx, (url, path, desc) in enumerate(icons):
                 if self.check_cancelled():
                     return False
-                icon_progress = 0.65 + (idx / total_icons) * 0.05
+                icon_progress = 0.11 + (idx / total_icons) * 0.01
                 self.update_progress(icon_progress)
                 if not self.download_file(url, str(path), desc):
                     self.log(
@@ -12842,11 +13186,11 @@ class AffinityInstallerGUI(QMainWindow):
             # build what it supports rather than keeping a version list.
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Setting up Windows Metadata...")
-                self.update_progress(0.70)
+                self.update_progress(0.12)
                 self.setup_winmetadata()
             elif self.wine_resolves_winrt_namespaces():
                 self.update_progress_text("Setting up Windows Metadata...")
-                self.update_progress(0.70)
+                self.update_progress(0.12)
                 self.install_combined_winmetadata()
             else:
                 self.log(
@@ -12864,8 +13208,8 @@ class AffinityInstallerGUI(QMainWindow):
 
             if cache_all_wine_versions():
                 self.update_progress_text("Caching other Wine versions...")
-                self.update_progress(0.72)
-                self._download_all_wine_versions_to_cache(wine_version)
+                with self.progress_span(0.12, 0.17, expected_seconds=30):
+                    self._download_all_wine_versions_to_cache(wine_version)
             else:
                 self.log(
                     "Not caching the other Wine versions; switching downloads the one "
@@ -12892,7 +13236,7 @@ class AffinityInstallerGUI(QMainWindow):
                         self.update_progress_text(
                             "NVIDIA GPU with DXVK preference - installing d3d12 DLLs..."
                         )
-                        self.update_progress(0.80)
+                        self.update_progress(0.17)
                         self.log(
                             "NVIDIA GPU with DXVK preference - installing d3d12 DLLs and setting up DLL overrides",
                             "info",
@@ -12902,7 +13246,7 @@ class AffinityInstallerGUI(QMainWindow):
                         self.update_progress_text(
                             "Setting up vkd3d-proton (GPU rendering)..."
                         )
-                        self.update_progress(0.80)
+                        self.update_progress(0.17)
                         self.setup_vkd3d()
                 elif self.has_amd_gpu() and (
                     gpu_id.startswith("amd_") or gpu_id.startswith("auto")
@@ -12910,7 +13254,7 @@ class AffinityInstallerGUI(QMainWindow):
                     self.update_progress_text(
                         "AMD GPU detected - installing DXVK via winetricks..."
                     )
-                    self.update_progress(0.80)
+                    self.update_progress(0.17)
                     self.log(
                         "AMD GPU detected - installing DXVK via winetricks", "info"
                     )
@@ -12919,11 +13263,11 @@ class AffinityInstallerGUI(QMainWindow):
                     self.install_d3d12_dlls()
                 else:
                     self.update_progress_text("Setting up vkd3d-proton (GPU rendering)...")
-                    self.update_progress(0.80)
+                    self.update_progress(0.17)
                     self.setup_vkd3d()
             else:
                 self.update_progress_text("Installing d3d12 DLLs...")
-                self.update_progress(0.80)
+                self.update_progress(0.17)
                 self.log(
                     "GPU rendering was not chosen, but installing d3d12 DLLs into Wine for compatibility",
                     "info",
@@ -12935,8 +13279,9 @@ class AffinityInstallerGUI(QMainWindow):
 
             # Configure Wine
             self.update_progress_text("Configuring Wine with winetricks...")
-            self.update_progress(0.90)
-            if not self.configure_wine():
+            with self.progress_span(0.18, 1.0):
+                configured = self.configure_wine()
+            if not configured:
                 return False
 
             if self.check_cancelled():
@@ -12957,6 +13302,7 @@ class AffinityInstallerGUI(QMainWindow):
             return False
 
         finally:
+            progress.close()
             # Make sure to end the operation even if there was an error or cancellation
             if (
                 hasattr(self, "current_operation")
@@ -14463,94 +14809,30 @@ class AffinityInstallerGUI(QMainWindow):
             "Installing Wine components (this may take several minutes)...", "info"
         )
         total_components = len(components)
+        expected = [WINETRICKS_EXPECTED_SECONDS.get(c, 15) for c in components]
+        # The verbs, then about half a minute of winecfg, theme, and the
+        # runtime checks after them.
+        expected.append(30)
+        total_expected = float(sum(expected))
         for idx, component in enumerate(components):
             if self.cancel_event.is_set():
                 return False
+            # This verb's share of the bar, in proportion to how long it takes.
+            share_lo = sum(expected[:idx]) / total_expected
+            share_hi = sum(expected[:idx + 1]) / total_expected
+            with self.progress_span(share_lo, share_hi,
+                                    expected_seconds=expected[idx]):
+                if not self._configure_wine_component(
+                        component, idx, total_components, env):
+                    return False
 
-            # Every verb starts from a quiet prefix: leftovers from the previous
-            # verb are what make Windows Installer queue and the run hang.
-            self.stop_prefix_wine_processes(
-                env, reason=f"starting '{component}'"
-            )
+        with self.progress_span(1.0 - expected[-1] / total_expected, 1.0,
+                                expected_seconds=expected[-1]):
+            return self._finish_wine_configuration(env, wine_cfg)
 
-            # Calculate base progress for this component (0.0 to 1.0 across all components)
-            base_progress = idx / total_components
-            component_progress_range = 1.0 / total_components
-
-            # Update progress label to show current component
-            self.update_progress_text(
-                f"Installing: {component} ({idx + 1}/{total_components})"
-            )
-
-            self.log(
-                f"Installing {component}... [{idx + 1}/{total_components}]", "info"
-            )
-            self.log("  (Progress will be shown below)", "info")
-
-            # Progress callback that updates based on component progress
-            def update_component_progress(percent):
-                # percent is 0.0-1.0 for this component
-                # Map it to overall progress
-                overall_progress = base_progress + (percent * component_progress_range)
-                self.update_progress(overall_progress)
-
-            # The fonts go in directly; winetricks only if that fails.
-            component_ok = (component in DIRECT_FONT_VERBS
-                            and self.install_font_verb_directly(component, env))
-            # Use streaming to show progress
-            if not component_ok:
-                component_ok = self.run_command_streaming(
-                    self.build_winetricks_command(component),
-                    env=env,
-                    progress_callback=update_component_progress,
-                    stall_timeout=600,
-                    activity_probe=self._prefix_activity,
-                    hard_limit=2700,
-                )
-            # The .NET installers' 32-bit setups crash intermittently under
-            # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
-            # address space); clean runs of the same verb succeed. Once more,
-            # from a stopped prefix, before giving up on one Affinity needs.
-            # A stall gets the retry too: the .NET 4.0 self-extractor has been
-            # seen to hang mid-unpack (and the stall watchdog to kill it) on one
-            # machine while the same verb ran through on another.
-            if (not component_ok and component.startswith("dotnet")
-                    and not self.cancel_event.is_set()):
-                how = "stalled" if self._last_command_stalled else "failed"
-                self.log(f"'{component}' {how}; stopping the prefix's Wine and trying once more", "warning")
-                self.stop_prefix_wine_processes(env, reason=f"retrying '{component}'")
-                component_ok = self.run_command_streaming(
-                    self.build_winetricks_command(component),
-                    env=env,
-                    progress_callback=update_component_progress,
-                    stall_timeout=600,
-                    activity_probe=self._prefix_activity,
-                    hard_limit=2700,
-                )
-            # Go by what is in the prefix, not by winetricks' exit: .NET can be
-            # complete while its installer is still being waited on.
-            if (not component_ok and component == "dotnet48"
-                    and not self.cancel_event.is_set() and self.has_dotnet48_runtime()):
-                self.log("'dotnet48' reported a problem, but .NET Framework 4.8 is installed", "success")
-                component_ok = True
-                self._last_command_stalled = False
-            if not component_ok and not self.cancel_event.is_set():
-                if self._last_command_stalled:
-                    self._stalled_components.add(component)
-                    self.log(
-                        f"'{component}' stalled — Wine stopped responding and was stopped.",
-                        "error",
-                    )
-                    self.log(
-                        "If this repeats, switch to the other Wine version (11.19 / 11.20) and try again (Wine 11+ new WoW64 hangs winetricks).",
-                        "warning",
-                    )
-                else:
-                    self.log(f"'{component}' failed — continuing with the rest", "warning")
-
-            # Mark this component as complete
-            self.update_progress(base_progress + component_progress_range)
-
+    def _finish_wine_configuration(self, env, wine_cfg):
+        """configure_wine after the verbs: renderer, Windows version, theme,
+        and the check that the runtimes Affinity needs are there."""
         if not self.cancel_event.is_set():
             self.ensure_vulkan_renderer(env)
 
@@ -14584,6 +14866,86 @@ class AffinityInstallerGUI(QMainWindow):
         self.update_progress_text("Ready")
         return True
 
+    def _configure_wine_component(self, component, idx, total_components, env):
+        """Install one winetricks verb (configure_wine's loop body). A verb that
+        fails is logged and the rest go on; False only when cancelled."""
+        # Every verb starts from a quiet prefix: leftovers from the previous
+        # verb are what make Windows Installer queue and the run hang.
+        self.stop_prefix_wine_processes(
+            env, reason=f"starting '{component}'"
+        )
+
+        # Update progress label to show current component
+        self.update_progress_text(
+            f"Installing: {component} ({idx + 1}/{total_components})"
+        )
+
+        self.log(
+            f"Installing {component}... [{idx + 1}/{total_components}]", "info"
+        )
+        self.log("  (Progress will be shown below)", "info")
+
+        # The percent winetricks prints is its download's, the start of the
+        # verb, not the install: it fills the first tenth of the verb's share,
+        # and the time estimate (progress_span) moves the bar after that.
+        def update_component_progress(percent):
+            self.update_progress(0.1 * percent)
+
+        # The fonts go in directly; winetricks only if that fails.
+        component_ok = (component in DIRECT_FONT_VERBS
+                        and self.install_font_verb_directly(component, env))
+        # Use streaming to show progress
+        if not component_ok:
+            component_ok = self.run_command_streaming(
+                self.build_winetricks_command(component),
+                env=env,
+                progress_callback=update_component_progress,
+                stall_timeout=600,
+                activity_probe=self._prefix_activity,
+                hard_limit=2700,
+            )
+        # The .NET installers' 32-bit setups crash intermittently under
+        # Wine 11's new WoW64 (an unhandled page fault high in the 32-bit
+        # address space); clean runs of the same verb succeed. Once more,
+        # from a stopped prefix, before giving up on one Affinity needs.
+        # A stall gets the retry too: the .NET 4.0 self-extractor has been
+        # seen to hang mid-unpack (and the stall watchdog to kill it) on one
+        # machine while the same verb ran through on another.
+        if (not component_ok and component.startswith("dotnet")
+                and not self.cancel_event.is_set()):
+            how = "stalled" if self._last_command_stalled else "failed"
+            self.log(f"'{component}' {how}; stopping the prefix's Wine and trying once more", "warning")
+            self.stop_prefix_wine_processes(env, reason=f"retrying '{component}'")
+            component_ok = self.run_command_streaming(
+                self.build_winetricks_command(component),
+                env=env,
+                progress_callback=update_component_progress,
+                stall_timeout=600,
+                activity_probe=self._prefix_activity,
+                hard_limit=2700,
+            )
+        # Go by what is in the prefix, not by winetricks' exit: .NET can be
+        # complete while its installer is still being waited on.
+        if (not component_ok and component == "dotnet48"
+                and not self.cancel_event.is_set() and self.has_dotnet48_runtime()):
+            self.log("'dotnet48' reported a problem, but .NET Framework 4.8 is installed", "success")
+            component_ok = True
+            self._last_command_stalled = False
+        if not component_ok and not self.cancel_event.is_set():
+            if self._last_command_stalled:
+                self._stalled_components.add(component)
+                self.log(
+                    f"'{component}' stalled — Wine stopped responding and was stopped.",
+                    "error",
+                )
+                self.log(
+                    "If this repeats, switch to the other Wine version (11.20 / 11.21) and try again (Wine 11+ new WoW64 hangs winetricks).",
+                    "warning",
+                )
+            else:
+                self.log(f"'{component}' failed — continuing with the rest", "warning")
+
+        return not self.cancel_event.is_set()
 
     def show_main_menu(self):
         """Display main application menu"""
@@ -14604,16 +14966,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.20 (Recommended) - Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
-            "• Wine 11.19 - Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues.\n\n"
+            "• Wine 11.21 (Recommended) - Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
+            "• Wine 11.20 - Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues.\n\n"
             "Note: You can switch versions later by running this setup again.",
-            ["Wine 11.20 (Recommended)", "Wine 11.19"],
+            ["Wine 11.21 (Recommended)", "Wine 11.20"],
         )
 
-        if wine_version == "Wine 11.20 (Recommended)":
+        if wine_version == "Wine 11.21 (Recommended)":
+            wine_version_choice = "11.21"
+        elif wine_version == "Wine 11.20":
             wine_version_choice = "11.20"
-        elif wine_version == "Wine 11.19":
-            wine_version_choice = "11.19"
         else:
             self.log("Wine setup cancelled", "warning")
             return
@@ -14632,7 +14994,7 @@ class AffinityInstallerGUI(QMainWindow):
         """Get Wine version configuration (URL, filename, SHA-256, etc.)
 
         Args:
-            wine_version: "11.18", "11.19" or "11.20"
+            wine_version: "11.18", "11.19", "11.20" or "11.21"
 
         Returns:
             dict with wine_url, wine_file_name, wine_sha256, wine_dir_name, wine_dir_pattern, archive_format, wine_display_name
@@ -14659,23 +15021,34 @@ class AffinityInstallerGUI(QMainWindow):
                 "archive_format": "xz",
                 "wine_display_name": "Wine 11.19 (full Affinity patch set)",
             }
-        else:  # Default to 11.20
+        elif wine_version == "11.20":
             return {
                 # POC SOURCE -- the fork's release of the 11.20 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r1/ElementalWarrior-wine-11.20.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r7/ElementalWarrior-wine-11.20.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.20.tar.xz",
                 "wine_sha256": WINE_11_20_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
                 "wine_dir_pattern": "ElementalWarrior-wine-11.20*",
                 "archive_format": "xz",
-                "wine_display_name": "Wine 11.20 (Latest - full Affinity patch set)",
+                "wine_display_name": "Wine 11.20 (full Affinity patch set)",
+            }
+        else:  # Default to 11.21
+            return {
+                # POC SOURCE -- the fork's release of the 11.21 patch set.
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r5/ElementalWarrior-wine-11.21.tar.xz",
+                "wine_file_name": "ElementalWarrior-wine-11.21.tar.xz",
+                "wine_sha256": WINE_11_21_SHA256,
+                "wine_dir_name": "ElementalWarriorWine",
+                "wine_dir_pattern": "ElementalWarrior-wine-11.21*",
+                "archive_format": "xz",
+                "wine_display_name": "Wine 11.21 (Latest - full Affinity patch set)",
             }
 
     def _download_wine_to_cache(self, wine_version, cache_dir):
         """Download a Wine version to cache directory
 
         Args:
-            wine_version: "11.19" or "11.20"
+            wine_version: "11.20" or "11.21"
             cache_dir: Path to cache directory
 
         Returns:
@@ -14775,7 +15148,7 @@ class AffinityInstallerGUI(QMainWindow):
         cache_dir = Path(self.directory) / "Wine-Switch"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        all_versions = ["11.19", "11.20"]
+        all_versions = ["11.20", "11.21"]
 
         self.log(
             "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -14896,11 +15269,11 @@ class AffinityInstallerGUI(QMainWindow):
         except Exception as e:
             self.log(f"Error checking DXVK/vkd3d-proton updates: {e}", "warning")
 
-    def _setup_wine_switch(self, wine_version="11.20"):
+    def _setup_wine_switch(self, wine_version="11.21"):
         """Setup Wine binary only - for switching versions without reconfiguration
 
         Args:
-            wine_version: "11.19" or "11.20" (recommended)
+            wine_version: "11.20" or "11.21" (recommended)
         """
         try:
             # Get Wine version configuration
@@ -15145,16 +15518,16 @@ class AffinityInstallerGUI(QMainWindow):
         wine_version = self.show_question_dialog(
             "Choose Wine Version",
             "Which Wine version would you like to install?\n\n"
-            "• Wine 11.20 (Recommended) - Latest build with the full Affinity patch set on Wine 11.20: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
-            "• Wine 11.19 - Previous build: the same Affinity patch set on Wine 11.19. Fallback if 11.20 has issues.\n\n"
+            "• Wine 11.21 (Recommended) - Latest build with the full Affinity patch set on Wine 11.21: Direct2D throughput and brush-latency fixes, Vulkan and OpenGL presentation fixes, OpenCL event dispatcher, pen pressure, plus color, printing, login and installer fixes.\n"
+            "• Wine 11.20 - Previous build: the same Affinity patch set on Wine 11.20. Fallback if 11.21 has issues.\n\n"
             "Note: This will replace your current Wine installation.",
-            ["Wine 11.20 (Recommended)", "Wine 11.19"],
+            ["Wine 11.21 (Recommended)", "Wine 11.20"],
         )
 
-        if wine_version == "Wine 11.20 (Recommended)":
+        if wine_version == "Wine 11.21 (Recommended)":
+            wine_version_choice = "11.21"
+        elif wine_version == "Wine 11.20":
             wine_version_choice = "11.20"
-        elif wine_version == "Wine 11.19":
-            wine_version_choice = "11.19"
         else:
             self.log("Wine version switch cancelled", "warning")
             return
@@ -15479,7 +15852,7 @@ Would you like to continue with {distro_name} anyway?"""
                             "info",
                         )
                         self.log(
-                            "Close the installer, switch to the other Wine version (11.19 / 11.20), then try again.",
+                            "Close the installer, switch to the other Wine version (11.20 / 11.21), then try again.",
                             "warning",
                         )
                     else:
@@ -16062,13 +16435,27 @@ Would you like to continue with {distro_name} anyway?"""
                 Path(self.directory) / "MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
             )
 
-            if not self.download_file(
-                webview2_url, str(webview2_file), "WebView2 Runtime"
-            ):
-                self.log("Failed to download WebView2 Runtime", "error")
-                return False
-
-            self.log("WebView2 Runtime downloaded", "success")
+            cached = webview2_cache_file()
+            cached_version = pe_file_version(cached) if cached.is_file() else None
+            if cached_version:
+                shutil.copyfile(cached, webview2_file)
+                self.log(f"Using the kept WebView2 Runtime installer ({cached_version})", "success")
+            else:
+                if not self.download_file(
+                    webview2_url, str(webview2_file), "WebView2 Runtime"
+                ):
+                    self.log("Failed to download WebView2 Runtime", "error")
+                    return False
+                self.log("WebView2 Runtime downloaded", "success")
+                # Kept for later prefixes; a partial copy never takes the name.
+                if pe_file_version(webview2_file):
+                    try:
+                        cached.parent.mkdir(parents=True, exist_ok=True)
+                        partial = cached.with_name(cached.name + ".part")
+                        shutil.copyfile(webview2_file, partial)
+                        partial.replace(cached)
+                    except OSError as e:
+                        self.log(f"Could not keep the WebView2 installer for later: {e}", "info")
 
             # Step 3: Install WebView2 Runtime using system wine (like Affinity v3)
             self.log("Installing Microsoft Edge WebView2 Runtime...", "info")
@@ -16731,6 +17118,12 @@ Would you like to continue with {distro_name} anyway?"""
                     "Publisher": "Affinity Publisher",
                 }.get(app_name, app_name)
 
+                # The install's own work is done, but the Wine session it
+                # started is still up: services, the .NET compile service,
+                # WebView2's updater, the security service. Close it, unless
+                # Affinity has been started in the prefix meanwhile.
+                self.end_install_session()
+
                 self.log(f"\n✓ {display_name} installation completed!", "success")
                 how = self.launch_instructions()
                 self.log(how, "info")
@@ -17087,10 +17480,15 @@ Would you like to continue with {distro_name} anyway?"""
             self.log(f"Update error: {e}", "error")
             self.show_message("Update Error", f"An error occurred:\n{e}", "error")
 
-    def _run_installation_entry(self, app_name, installer_path):
-        """Wrapper: run installation and always end operation."""
+    def _run_installation_entry(self, app_name, installer_path, start=0.0):
+        """Wrapper: run installation and always end operation. `start` is
+        where its share of the bar begins (after the installer's download)."""
         try:
-            self.run_installation(app_name, installer_path)
+            # The installation's own share, closed before end_operation resets
+            # the bar: a helper's download inside it (the WinRT facades, the
+            # plugin loader) no longer fills the whole bar for a moment.
+            with self.progress_span(start, 1.0):
+                self.run_installation(app_name, installer_path)
         finally:
             self.end_operation()
 
@@ -17099,6 +17497,65 @@ Would you like to continue with {distro_name} anyway?"""
         "https://github.com/ryzendew/Linux-Affinity-Installer/blob/main/docs/Known-issues.md"
         "#affinity-installer-setupuiexe-crashes"
     )
+
+    SETUP_WAITING_TEXT = (
+        "Waiting for you: click Install in Affinity's setup window "
+        "(it may open behind this one)"
+    )
+
+    def _bring_setup_window_forward(self, stop, span):
+        """Once Affinity's setup window has opened, say the install waits for
+        the user (the step `span`) and raise the window.
+
+        It waits for the user to click Install, and it opened where Wine put
+        it, often behind this window or low in a corner, so an install looked
+        stalled for minutes. Uses xdotool, on X11 and XWayland. When the
+        window cannot be found (Wine's Wayland driver, an xdotool failure, or
+        a minute without it), the step says it waits for the user anyway."""
+        window = None
+        deadline = time.monotonic() + 60
+        while not stop.wait(1.0) and time.monotonic() < deadline:
+            try:
+                window = self._find_setup_window()
+            except (OSError, subprocess.SubprocessError):
+                break
+            if window:
+                break
+        if stop.is_set():
+            return
+        self.update_progress_text(self.SETUP_WAITING_TEXT)
+        self.mark_step_waiting(span)
+        if window:
+            try:
+                subprocess.run(["xdotool", "windowactivate", window], capture_output=True, timeout=5)
+                self.log("Brought Affinity's setup window to the front", "info")
+            except (OSError, subprocess.SubprocessError):
+                pass
+
+    def _find_setup_window(self):
+        """The X window id of Affinity's setup window in this prefix, or None."""
+        found = subprocess.run(
+            ["xdotool", "search", "--name", "^Affinity$"],
+            capture_output=True, text=True, timeout=5,
+        ).stdout.split()
+        for window in found:
+            pid = subprocess.run(
+                ["xdotool", "getwindowpid", window],
+                capture_output=True, text=True, timeout=5,
+            ).stdout.strip()
+            if pid.isdigit() and self._process_in_prefix(int(pid)):
+                return window
+        return None
+
+    def _process_in_prefix(self, pid):
+        """True when process pid runs in this installer's Wine prefix."""
+        try:
+            with open(f"/proc/{pid}/environ", "rb") as f:
+                variables = f.read().split(b"\0")
+        except OSError:
+            return False
+        wanted = b"WINEPREFIX=" + os.fsencode(str(Path(self.directory)))
+        return any(v.rstrip(b"/") == wanted.rstrip(b"/") for v in variables)
 
     def install_affinity_v3_from_msi(self, installer_file, env):
         """Install Affinity v3 from the MSI package embedded in its setup executable.
@@ -17257,7 +17714,7 @@ Would you like to continue with {distro_name} anyway?"""
             else:
                 # For custom installers, copy to Wine prefix with sanitized filename (remove spaces)
                 self.update_progress_text("Copying installer...")
-                self.update_progress(0.1)
+                self.update_progress(0.02)
                 original_filename = installer_path_obj.name
                 sanitized_filename = self.sanitize_filename(original_filename)
                 installer_file = Path(self.directory) / sanitized_filename
@@ -17269,7 +17726,7 @@ Would you like to continue with {distro_name} anyway?"""
 
             # Set Windows version
             self.update_progress_text("Configuring Wine...")
-            self.update_progress(0.2)
+            self.update_progress(0.04)
             # Check if this is Affinity v3 or v2
             installer_name = installer_file.name.lower()
             is_affinity_v3 = (
@@ -17294,31 +17751,56 @@ Would you like to continue with {distro_name} anyway?"""
             )
             self.run_command([str(wine_cfg), "-v", "win11"], check=False, env=env)
 
-            # Run installer
-            self.update_progress_text("Running installer...")
-            self.update_progress(0.3)
+            # Run installer. The shares from here follow the time each step
+            # takes on a fresh install: the setup about a minute, the native
+            # images 30-40 s, WebView2 one to two minutes, the rest seconds.
+            # Say that the install waits for the user only once the setup
+            # window is there to click: said at launch, it sent people looking
+            # for a window that had not opened yet. Without xdotool the window
+            # cannot be seen, so it is said at once.
+            watch_window = bool(shutil.which("xdotool"))
+            self.update_progress_text(
+                "Starting Affinity's setup..." if watch_window else self.SETUP_WAITING_TEXT
+            )
+            self.update_progress(0.05)
 
             env["WINEDEBUG"] = "-all"
             self.log("Launching installer...", "info")
-            self.log("Follow the installation wizard in the window that opens.", "info")
+            self.log(
+                "Affinity's setup window opens next and waits for you to click Install; "
+                "it may open behind this window.",
+                "info",
+            )
             self.log("Click 'No' if you encounter any errors.", "warning")
 
             # Run installer and wait, capturing logs (with fallback)
-            success = self._run_installer_and_capture(
-                installer_file, env, label="installer"
-            )
-            if not success and not self.check_cancelled():
-                self.log("Installer process exited with a non-zero status", "warning")
+            raise_stop = threading.Event()
+            with self.progress_span(0.05, 0.35, waiting=not watch_window):
+                if watch_window:
+                    with self._progress_lock:
+                        setup_span = self._progress_spans[-1]
+                    threading.Thread(
+                        target=self._bring_setup_window_forward,
+                        args=(raise_stop, setup_span), daemon=True,
+                    ).start()
+                try:
+                    success = self._run_installer_and_capture(
+                        installer_file, env, label="installer"
+                    )
+                finally:
+                    raise_stop.set()
+                if not success and not self.check_cancelled():
+                    self.log("Installer process exited with a non-zero status", "warning")
 
-            installs_unified = app_name in ("Add", "Affinity (Unified)")
-            affinity_v3_exe = self.affinity_v3_exe_path()
-            msi_failure = "The Affinity setup finished without installing Affinity."
-            if installs_unified and not affinity_v3_exe.exists() and not self.check_cancelled():
-                self.log("The Affinity setup finished without installing Affinity", "warning")
-                _, msi_failure = self.install_affinity_v3_from_msi(installer_file, env)
+                installs_unified = app_name in ("Add", "Affinity (Unified)")
+                affinity_v3_exe = self.affinity_v3_exe_path()
+                msi_failure = "The Affinity setup finished without installing Affinity."
+                if installs_unified and not affinity_v3_exe.exists() and not self.check_cancelled():
+                    self.log("The Affinity setup finished without installing Affinity", "warning")
+                    _, msi_failure = self.install_affinity_v3_from_msi(installer_file, env)
 
             # Clean up installer (only if it was copied to Wine prefix, not if it's in .AffinityLinux/Installer/)
-            self.update_progress(0.5)
+            self.update_progress(0.35)
             if installer_file.parent != installer_dir:
                 # Only remove if it was copied (not the original in Installer folder)
                 if installer_file.exists():
@@ -17342,7 +17824,7 @@ Would you like to continue with {distro_name} anyway?"""
             wine_version = self.get_current_wine_version()
             if wine_version in ["9.14", "10.10"]:
                 self.update_progress_text("Restoring Windows Metadata...")
-                self.update_progress(0.6)
+                self.update_progress(0.36)
                 self.restore_winmetadata()
             else:
                 self.log(
@@ -17355,7 +17837,7 @@ Would you like to continue with {distro_name} anyway?"""
             # Configure OpenCL (if enabled)
             if self.is_opencl_enabled():
                 self.update_progress_text("Setting up GPU rendering for Affinity...")
-                self.update_progress(0.7)
+                self.update_progress(0.37)
                 self.configure_opencl(app_name)
             else:
                 self.log("GPU rendering was not chosen; vkd3d-proton not placed beside Affinity", "info")
@@ -17365,7 +17847,7 @@ Would you like to continue with {distro_name} anyway?"""
                 wine_version = self.get_current_wine_version()
                 if wine_version in ["9.14", "10.10"]:
                     self.update_progress_text("Configuring wintypes.dll for v2 app...")
-                    self.update_progress(0.82)
+                    self.update_progress(0.38)
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
@@ -17379,7 +17861,7 @@ Would you like to continue with {distro_name} anyway?"""
                 if wine_version in ["9.14", "10.10"]:
                     # Copy wintypes.dll and set override
                     self.update_progress_text("Configuring wintypes.dll for v3 app...")
-                    self.update_progress(0.82)
+                    self.update_progress(0.38)
                     self.setup_wintypes_dll(app_name)
                 else:
                     self.log(
@@ -17389,15 +17871,17 @@ Would you like to continue with {distro_name} anyway?"""
 
                 # Patch the DLL to fix settings saving
                 self.update_progress_text("Patching DLL for settings fix...")
-                self.update_progress(0.85)
+                self.update_progress(0.39)
                 self.patch_affinity_dll(app_name)
 
                 # Only now: the patch rewrites Serif.Affinity.dll and keeps its
                 # identity, so images compiled before it are loaded anyway and
                 # Affinity dies in clr.dll at every start.
                 if self.affinity_v3_exe_path().exists():
-                    self.precompile_affinity()
-                    self.ensure_webview2_runtime()
+                    with self.progress_span(0.42, 0.55, expected_seconds=40):
+                        self.precompile_affinity()
+                    with self.progress_span(0.55, 0.88, expected_seconds=100):
+                        self.ensure_webview2_runtime()
 
             # Install the file-manager handler before the desktop entry, which
             # only claims the document types once the handler is in place.
@@ -17427,7 +17911,8 @@ Would you like to continue with {distro_name} anyway?"""
                     self.log(
                         "\nRunning AffinityPluginLoader + WineFix install...", "info"
                     )
-                    self._install_affinity_plugin_loader_thread(standalone=False)
+                    with self.progress_span(0.91, 0.96, expected_seconds=10):
+                        self._install_affinity_plugin_loader_thread(standalone=False)
                 else:
                     self.log(
                         "\n⚠ Affinity directory not found — skipping AffinityPluginLoader install.",
@@ -19002,74 +19487,56 @@ Would you like to continue with {distro_name} anyway?"""
                 if not dest_file.exists():
                     all_exist = False
 
-            # Download ReturnColors from GitHub (still in Patch/ directory, not in AffinityPatcherSettings/)
-            returncolors_dest = (
-                Path(self.directory) / "Patch" / "return-affinity-colors"
-            )
-            returncolors_repo = (
-                "https://github.com/ShawnTheBeachy/return-affinity-colors.git"
-            )
 
-            # Check if ReturnColors project folder exists (it's inside return-affinity-colors/ReturnColors/)
-            returncolors_project_exists = (
-                returncolors_dest.exists()
-                and (returncolors_dest / "ReturnColors").exists()
-                and (
-                    returncolors_dest / "ReturnColors" / "ReturnColors.csproj"
-                ).exists()
-            )
+            if files_copied and not silent:
+                self.log("Patcher files are ready in .AffinityLinux/Patch/", "success")
+            elif files_downloaded and not silent:
+                self.log(
+                    "Patcher files downloaded and ready in .AffinityLinux/Patch/",
+                    "success",
+                )
+            elif not all_exist and not silent:
+                self.log("Some patcher files are missing", "warning")
 
-            if not returncolors_project_exists:
-                if not silent:
-                    self.log("Downloading ReturnColors from GitHub...", "info")
+            return all_exist
+        except Exception as e:
+            if not silent:
+                self.log(f"Error ensuring patcher files: {e}", "error")
+            return False
 
-                # Try git clone first (preferred method)
-                if self.check_command("git"):
-                    try:
-                        # Remove existing directory if it exists but is incomplete
-                        if returncolors_dest.exists():
-                            shutil.rmtree(returncolors_dest)
+    def ensure_return_colors_files(self, silent=False):
+        """Fetch ReturnColors into .AffinityLinux/Patch/ for the return-colors
+        feature. Only that feature needs it: fetched at every start and before
+        One-Click Setup, which waited on it, it held the setup up for half a
+        minute."""
+        with _PATCHER_FILES_LOCK:
+            try:
+                # Download ReturnColors from GitHub (still in Patch/ directory, not in AffinityPatcherSettings/)
+                returncolors_dest = (
+                    Path(self.directory) / "Patch" / "return-affinity-colors"
+                )
+                returncolors_repo = (
+                    "https://github.com/ShawnTheBeachy/return-affinity-colors.git"
+                )
+                returncolors_dest.parent.mkdir(parents=True, exist_ok=True)
 
-                        # Clone the repository
-                        success, stdout, stderr = self.run_command(
-                            [
-                                "git",
-                                "clone",
-                                "--depth",
-                                "1",
-                                returncolors_repo,
-                                str(returncolors_dest),
-                            ],
-                            check=False,
-                            capture=True,
-                        )
+                # Check if ReturnColors project folder exists (it's inside return-affinity-colors/ReturnColors/)
+                returncolors_project_exists = (
+                    returncolors_dest.exists()
+                    and (returncolors_dest / "ReturnColors").exists()
+                    and (
+                        returncolors_dest / "ReturnColors" / "ReturnColors.csproj"
+                    ).exists()
+                )
 
-                        if success:
-                            if not silent:
-                                self.log(
-                                    "ReturnColors downloaded from GitHub via git",
-                                    "success",
-                                )
-                        else:
-                            if not silent:
-                                self.log(
-                                    f"Git clone failed: {stderr[:200] if stderr else 'Unknown error'}",
-                                    "warning",
-                                )
-                            # Fall through to zip download
-                            if returncolors_dest.exists():
-                                shutil.rmtree(returncolors_dest)
-                    except Exception as e:
-                        if not silent:
-                            self.log(f"Error cloning ReturnColors: {e}", "warning")
-                        if returncolors_dest.exists():
-                            try:
-                                shutil.rmtree(returncolors_dest)
-                            except:
-                                pass
+                def project_ready():
+                    return (returncolors_dest / "ReturnColors" / "ReturnColors.csproj").exists()
 
-                # Fallback: Download as zip and extract
                 if not returncolors_project_exists:
+                    if not silent:
+                        self.log("Downloading ReturnColors from GitHub...", "info")
+
+                    # The ZIP first.
                     try:
                         # Download zip from GitHub
                         zip_url = "https://github.com/ShawnTheBeachy/return-affinity-colors/archive/refs/heads/main.zip"
@@ -19090,7 +19557,7 @@ Would you like to continue with {distro_name} anyway?"""
                             # Extract zip
                             with zipfile.ZipFile(temp_zip_path, "r") as zip_ref:
                                 # Extract to a temp directory first
-                                temp_extract = dest_patch_dir / ".temp_returncolors"
+                                temp_extract = returncolors_dest.parent / ".temp_returncolors"
                                 if temp_extract.exists():
                                     shutil.rmtree(temp_extract)
                                 temp_extract.mkdir(exist_ok=True)
@@ -19153,24 +19620,57 @@ Would you like to continue with {distro_name} anyway?"""
                     except Exception as e:
                         if not silent:
                             self.log(f"Error downloading ReturnColors: {e}", "warning")
-            elif not silent:
-                self.log("ReturnColors already exists in .AffinityLinux/Patch/", "info")
+                    # A clone as the fallback: the repository is 30 MB and took 20-35 s
+                    # to clone, where its ZIP (12 MB) downloads in about 2 s.
+                    if not project_ready() and self.check_command("git"):
+                        try:
+                            # Remove existing directory if it exists but is incomplete
+                            if returncolors_dest.exists():
+                                shutil.rmtree(returncolors_dest)
 
-            if files_copied and not silent:
-                self.log("Patcher files are ready in .AffinityLinux/Patch/", "success")
-            elif files_downloaded and not silent:
-                self.log(
-                    "Patcher files downloaded and ready in .AffinityLinux/Patch/",
-                    "success",
-                )
-            elif not all_exist and not silent:
-                self.log("Some patcher files are missing", "warning")
+                            # Clone the repository
+                            success, stdout, stderr = self.run_command(
+                                [
+                                    "git",
+                                    "clone",
+                                    "--depth",
+                                    "1",
+                                    returncolors_repo,
+                                    str(returncolors_dest),
+                                ],
+                                check=False,
+                                capture=True,
+                            )
 
-            return all_exist
-        except Exception as e:
-            if not silent:
-                self.log(f"Error ensuring patcher files: {e}", "error")
-            return False
+                            if success:
+                                if not silent:
+                                    self.log(
+                                        "ReturnColors downloaded from GitHub via git",
+                                        "success",
+                                    )
+                            else:
+                                if not silent:
+                                    self.log(
+                                        f"Git clone failed: {stderr[:200] if stderr else 'Unknown error'}",
+                                        "warning",
+                                    )
+                                # Fall through to zip download
+                                if returncolors_dest.exists():
+                                    shutil.rmtree(returncolors_dest)
+                        except Exception as e:
+                            if not silent:
+                                self.log(f"Error cloning ReturnColors: {e}", "warning")
+                            if returncolors_dest.exists():
+                                try:
+                                    shutil.rmtree(returncolors_dest)
+                                except:
+                                    pass
+
+                elif not silent:
+                    self.log("ReturnColors already exists in .AffinityLinux/Patch/", "info")
+            except Exception as e:
+                if not silent:
+                    self.log(f"Error fetching ReturnColors: {e}", "warning")
 
     def build_affinity_patcher(self):
         """Build the AffinityPatcher .NET project"""
@@ -19310,7 +19810,7 @@ Would you like to continue with {distro_name} anyway?"""
             self.log(f"ReturnColors directory not found: {returncolors_dir}", "warning")
             self.log("Attempting to download ReturnColors from GitHub...", "info")
             # Try to ensure it's downloaded
-            self.ensure_patcher_files(silent=True)
+            self.ensure_return_colors_files(silent=True)
             # Check again after download attempt
             returncolors_repo_dir = patch_dir / "return-affinity-colors"
             returncolors_dir = returncolors_repo_dir / "ReturnColors"
@@ -19440,7 +19940,7 @@ Would you like to continue with {distro_name} anyway?"""
         )
 
         # Ensure patcher files (including ReturnColors) are available
-        self.ensure_patcher_files(silent=True)
+        self.ensure_return_colors_files(silent=True)
 
         # Check if .NET SDK is available, try to install if missing
         if not self.check_dotnet_sdk():
@@ -21344,6 +21844,7 @@ Would you like to continue with {distro_name} anyway?"""
 
         # Ensure patcher files are available
         self.ensure_patcher_files()
+        self.ensure_return_colors_files()
 
         # Check if .NET SDK 10.0+ is installed (required for ReturnColors)
         if not self.check_dotnet_sdk_10():
@@ -22977,6 +23478,18 @@ Would you like to continue with {distro_name} anyway?"""
                             self.log(
                                 "  ✓ WineFix patches Wine's own d2d1 at runtime", "success"
                             )
+                        try:
+                            if winefix_disable_bezier_split_guard(install_dir):
+                                self.log(
+                                    "  ✓ WineFix's bezier split guard is off: it hooks the "
+                                    "wrong function in these Wine builds",
+                                    "success",
+                                )
+                        except OSError as exc:
+                            self.log(
+                                f"  ⚠ Could not turn off WineFix's bezier split guard: {exc}",
+                                "warning",
+                            )
 
             # ── 5. Verify AffinityHook.exe is present after install ───────────────────
             hook_exe = install_dir / "AffinityHook.exe"
@@ -22995,81 +23508,13 @@ Would you like to continue with {distro_name} anyway?"""
 
             self.log("✓ AffinityHook.exe confirmed present", "success")
 
-            # ── 6. Inform user, then immediately run AffinityHook ────────────────────
-            self.log(
-                "\nInforming user about AffinityPluginLoader installation...", "info"
-            )
-            self.show_message(
-                "AffinityPluginLoader Installed",
-                "AffinityPluginLoader + WineFix have been installed!\n\n"
-                "The installer will now run AffinityHook.exe once in the background "
-                "to complete its initialisation.\n\n"
-                "You do not need to do anything — this will take a few seconds.",
-                "info",
-            )
-            self.log("Running AffinityHook.exe to complete initialisation...", "info")
-            try:
-                # Use the exact same wine + env as the .desktop entry does
-                wine_bin = str(self.get_wine_path("wine"))
-                hook_exe_path = str(
-                    Path(self.directory)
-                    / "drive_c"
-                    / "Program Files"
-                    / "Affinity"
-                    / "Affinity"
-                    / "AffinityHook.exe"
-                )
-                env = os.environ.copy()
-                env["WINEPREFIX"] = self.directory
-                env["WINEDEBUG"] = "-all,fixme-all"
-                # Apply GPU and DXVK env vars exactly as the .desktop does
-                gpu_env = self.get_gpu_env_vars()
-                dxvk_env = self.get_dxvk_env_vars()
-                if gpu_env:
-                    for var in gpu_env.strip().split():
-                        if "=" in var:
-                            k, v = var.split("=", 1)
-                            env[k] = v
-                if dxvk_env:
-                    for var in dxvk_env.strip().split():
-                        if "=" in var:
-                            k, v = var.split("=", 1)
-                            env[k] = v
-                self.log(f'Launching: {wine_bin} "{hook_exe_path}"', "info")
-                proc = subprocess.Popen(
-                    [wine_bin, hook_exe_path],
-                    env=env,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                self.log(
-                    "AffinityHook.exe launched — waiting 15 seconds then closing...",
-                    "info",
-                )
-                try:
-                    proc.wait(timeout=15)
-                    self.log(
-                        "AffinityHook.exe exited on its own within 15 seconds.", "info"
-                    )
-                except subprocess.TimeoutExpired:
-                    proc.terminate()
-                    try:
-                        proc.wait(timeout=5)
-                    except subprocess.TimeoutExpired:
-                        proc.kill()
-                    wineserver_bin = str(self.get_wine_path("wineserver"))
-                    subprocess.run(
-                        [wineserver_bin, "-k"],
-                        env=env,
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
-                    )
-                    self.log("✓ AffinityHook.exe closed after 15 seconds.", "success")
-            except Exception as e:
-                self.log(f"⚠ Could not run AffinityHook.exe: {e}", "warning")
-                self.log("  You may need to run it once manually.", "info")
+            # AffinityPluginLoader writes its config files at Affinity's first
+            # launch, and the WineFix setting this installer needs is written
+            # above. Starting Affinity here and killing it after 15 seconds, as
+            # this step used to, cut a cold first start off halfway and left a
+            # window in which the user could start a second instance.
 
-            # ── 7. Patch Affinity.desktop to launch AffinityHook.exe ─────────────────
+            # ── 6. Patch Affinity.desktop to launch AffinityHook.exe ─────────────────
             self.log("\nPatching Affinity.desktop to use AffinityHook.exe...", "info")
             self._patch_affinity_desktop_for_hook()
 

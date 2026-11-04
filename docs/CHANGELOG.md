@@ -1,5 +1,50 @@
 # Changelog
 
+## [2026-11-03] - Faster node editing
+
+### Changed
+- **Wine 11.21 installs [`11.21-r5`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r5) and Wine 11.20 [`11.20-r7`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r7)**, which have the fix below.
+
+### Fixed
+- **Editing the nodes of a dense path is much faster.** Affinity draws a small marker on every node of the path being edited, tens of thousands per frame on a detailed engraving, and Wine drew each one separately. It now draws runs of identical markers together, and the square roots Affinity's geometry code uses constantly run on the CPU's own instruction. While dragging a node, drawing the markers went from more than half of Affinity's time to a tenth.
+- **The installer no longer starts Affinity in the background** after installing AffinityPluginLoader, only to stop it 15 seconds later. The plugin loader writes its settings at your first launch anyway. The installer now ends the Wine processes the install leaves running (Wine's services, the .NET compile service, WebView2's updater) when it finishes, instead of leaving them for the manager to report.
+- **"This step" no longer sits at 100%** after a part of a step finishes; it shows the rest of the step's progress.
+- **One-Click Setup starts right away** instead of sitting for half a minute. At every start the installer cloned ReturnColors (a 30 MB repository, then downloaded it again as a ZIP), and the setup waited for it. ReturnColors is now fetched only when you use it, as a 12 MB ZIP.
+- **The installer says when it is waiting for you in Affinity's setup window**, and brings that window to the front. It could open behind the installer or low in a corner, and the install looked stalled while it waited for a click on Install.
+
+---
+
+## [2026-11-03] - Hang fix
+
+### Changed
+- **Wine 11.21 installs [`11.21-r4`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r4) and Wine 11.20 [`11.20-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r6)**, which have the fixes below.
+
+### Fixed
+- **Opening a large file no longer hangs, and fills draw again.** WineFix's "bezier split guard" finds the code it patches by a byte pattern, and in these Wine builds the pattern matches the fill triangulation instead, which then gave up at once. Shapes drew without fills, and a fault inside Wine's drawing code could leave a lock held, freezing Affinity on a heavy vector file. The installer now turns that WineFix option off (these builds limit bezier splitting themselves), and Wine no longer faults or holds the lock when a fill cannot be computed.
+- **Wine's "configuration is being updated" window no longer pops up over the installer**, which shows its own progress.
+- **Horizontal scrolling** keeps the pointer position and no longer stutters, and the window holding the mouse no longer gets a stray "mouse left" message.
+- **Pointed stroke corners** stop at the miter limit, as on Windows, instead of a fixed length.
+- **Text:** cached glyphs follow the rendering mode, a missing font falls back to the system fonts, and unsupported font files no longer break a font collection.
+- **Pen tablets:** a full packet queue drops its oldest packet, not the newest.
+
+---
+
+## [2026-11-02] - Wine 11.21, heavy vector art
+
+### Changed
+- **Wine 11.21 is the recommended version**, installed from [`11.21-r3`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r3) and pinned by SHA-256. It carries the whole Affinity patch set, less two fixes Wine 11.21 now makes itself. The choices are now Wine 11.21 (recommended) and Wine 11.20 (fallback); 11.19 is no longer offered.
+- **The 11.20 choice installs [`11.20-r4`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r4)**, which has the fixes below.
+
+### Fixed
+- **Heavy vector art no longer stalls.** Selecting a dense engraving (138,000 curves) took two to three minutes, because Wine re-processed its outline each time; it now takes about 2 seconds, and nudging it 2 to 3 seconds.
+- **Programs no longer crash as they exit.** Affinity's setup window, and any program that had drawn with Vulkan, crashed while closing (a core dump instead of a clean exit).
+- **Selecting and nudging very large vector art is about three times faster.** On a 138,000-curve engraving, each select or nudge spent most of its time in Wine preparing a fill Affinity never uses and redrawing the same selection outline from scratch; a nudge now takes about 1 second instead of 2.5.
+- **Two progress bars, each labeled with what it measures:** "Overall: 42% of One-Click Full Setup", which never moves back, and "This step", which starts again at each step and says whether its figure is downloaded bytes, parts done, or an estimate from the time the step usually takes.
+- **The progress bar no longer races ahead at the start.** The first files the setup downloads each filled the whole bar, so it read 75% a minute in and then fell back to 1%; helper downloads during the Affinity install did the same for a moment. They now stay within their own small share.
+- **Very large fills and strokes draw correctly.** Shapes with more than 65,535 points of geometry drew the wrong triangles, leaving holes or stray slivers.
+
+---
+
 ## [2026-10-20] - Wine 11.20
 
 ### Changed
