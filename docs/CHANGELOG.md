@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-11-06] - Startup crash fix
+
+### Changed
+- **Wine 11.21 installs [`11.21-r6`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.21-r6) and Wine 11.20 [`11.20-r8`](https://github.com/jfacemyer/Affinity-Wine-Builder/releases/tag/11.20-r8)**, which have the fix below.
+
+### Fixed
+- **Affinity no longer crashes at startup on some launches.** Affinity looks up fonts on several threads as it starts, and Wine could free a shared font object on one thread while another was still using it. On some machines this crashed every second or third launch.
+
+---
+
 ## [2026-11-03] - Faster node editing
 
 ### Changed

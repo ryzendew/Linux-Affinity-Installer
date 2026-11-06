@@ -108,8 +108,8 @@ grep -n 'POC SOURCE' AffinityScripts/AffinityLinuxInstaller.py AffinityManager/r
 |---|---|---|
 | Wine 11.18 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.18-r1/ElementalWarrior-wine-11.18.tar.xz`, pinned by `WINE_11_18_SHA256` | an upstream 11.18 release, likewise |
 | Wine 11.19 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.19-r10/ElementalWarrior-wine-11.19.tar.xz`, pinned by `WINE_11_19_SHA256` | an upstream 11.19 release, likewise |
-| Wine 11.20 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r7/ElementalWarrior-wine-11.20.tar.xz`, pinned by `WINE_11_20_SHA256` | an upstream 11.20 release, likewise |
-| Wine 11.21 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r5/ElementalWarrior-wine-11.21.tar.xz`, pinned by `WINE_11_21_SHA256` | an upstream 11.21 release, likewise |
+| Wine 11.20 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r8/ElementalWarrior-wine-11.20.tar.xz`, pinned by `WINE_11_20_SHA256` | an upstream 11.20 release, likewise |
+| Wine 11.21 tarball | `github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r6/ElementalWarrior-wine-11.21.tar.xz`, pinned by `WINE_11_21_SHA256` | an upstream 11.21 release, likewise |
 | AffinityPluginLoader + WineFix | `github.com/jfacemyer/AffinityPluginLoader`, release `wine-fixes-4` (`APL_RELEASE_REPO`, `APL_RELEASE_TAG`), each zip pinned in `APL_ASSET_SHA256` | `noahc3/AffinityPluginLoader`'s next release, once it carries upstream `dev` and the fork's fixes |
 | `affinity-on-linux.exe`, MIME definitions | the source branch: `SOURCE_REPO` / `SOURCE_BRANCH` (`github.com/jfacemyer/Linux-Affinity-Manager`, `main`), or whatever the manager was started from | upstream's repository, if this work is merged there |
 | The manager, via `AffinityManager/run.py` (`REPO`, `BRANCH`) | `github.com/jfacemyer/Linux-Affinity-Manager`, branch `main` | likewise |

@@ -530,14 +530,14 @@ WINE_11_18_SHA256 = "c325bf804407abcf8070d02066b5be00680b0339e796a6583b4a1d2dae9
 WINE_11_19_SHA256 = "637a0ec5ed8f225dd96c30796f9227f6f5a68ccc8e394a549391be7a6e9a626e"
 
 # The same patch set on Wine 11.20, offered as the fallback.
-WINE_11_20_SHA256 = "e4b7c61e066e3269d3d3c464764a35e032e6a572555f88e7358cefaee4353684"
+WINE_11_20_SHA256 = "e582d4897781dcb5a4631c81c82b54205b294eb66f74eb17c07e39b3d3fd5675"
 
 # Wine 11.21 with the full Affinity patch set, the default, pinned by content:
 # the 11.16 release once went three weeks without eight fixes the local builds
 # had, and nothing noticed. A tarball that is not this one is refused rather
 # than installed. Rebuild, republish under a new tag, and update the URL and
 # this hash together.
-WINE_11_21_SHA256 = "6b2d9059ea6df52623a5767afc2e0c5da7a7d256bae4bd658ceb9fda96b29408"
+WINE_11_21_SHA256 = "4f74e8676b4f40d4e4fc24e610187c2a6bb16a135b9cf538edf1b4f5de9523e3"
 
 # vkd3d-proton (Affinity's D3D12), pinned the same way. The installer used to
 # take whatever release was newest on GitHub, so new installs got each one the
@@ -15024,7 +15024,7 @@ class AffinityInstallerGUI(QMainWindow):
         elif wine_version == "11.20":
             return {
                 # POC SOURCE -- the fork's release of the 11.20 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r7/ElementalWarrior-wine-11.20.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.20-r8/ElementalWarrior-wine-11.20.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.20.tar.xz",
                 "wine_sha256": WINE_11_20_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
@@ -15035,7 +15035,7 @@ class AffinityInstallerGUI(QMainWindow):
         else:  # Default to 11.21
             return {
                 # POC SOURCE -- the fork's release of the 11.21 patch set.
-                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r5/ElementalWarrior-wine-11.21.tar.xz",
+                "wine_url": "https://github.com/jfacemyer/Affinity-Wine-Builder/releases/download/11.21-r6/ElementalWarrior-wine-11.21.tar.xz",
                 "wine_file_name": "ElementalWarrior-wine-11.21.tar.xz",
                 "wine_sha256": WINE_11_21_SHA256,
                 "wine_dir_name": "ElementalWarriorWine",
