@@ -5,6 +5,13 @@ install you cannot afford to break, plus a copy to try a new Wine build or
 Affinity release in, backups before an upgrade, or a test copy of a client's
 setup.
 
+## Donate Options if you Enjoy this project!
+
+| PayPal | Ko-fi |
+|:---:|:---:|
+|[<img src="https://github.com/vinceliuice/WhiteSur-gtk-theme/blob/pictures/pictures/paypal.png?raw=true" width="32" height="32" alt="paypal" />](https://paypal.me/gamedev1909)|[<img src="https://github.com/user-attachments/assets/06c1704b-ead5-4b4a-a865-9b85aa9f5015" width="32" height="32" alt="ko-fi" />](https://ko-fi.com/tlv)|
+
+
 <details>
 <summary><strong>Python GUI Dependencies</strong></summary>
 
