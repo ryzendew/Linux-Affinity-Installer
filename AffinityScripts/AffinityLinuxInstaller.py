@@ -3965,7 +3965,7 @@ class AffinityInstallerGUI(QMainWindow):
                     "GPU rendering",
                     self.enable_opencl_support,
                     "Set up vkd3d-proton (DXVK on AMD) so Affinity draws on your "
-                    "graphics card; OpenCL too, on Wine older than 11.11",
+                    "graphics card; OpenCL too, on supported Wine builds",
                     "lightning",
                 ),
             ],
@@ -9018,10 +9018,9 @@ class AffinityInstallerGUI(QMainWindow):
         desc_label.setTextFormat(Qt.TextFormat.RichText)
         desc_label.setText(
             "Please choose your preferred graphics backend:\n\n"
-            "• <b>vkd3d</b> - vkd3d-proton: Direct3D 12 on your GPU. The usual choice. "
-            "(OpenCL also works with it, but only on Wine older than 11.11.)\n"
-            "• <b>DXVK</b> - Direct3D 11 on your GPU, never OpenCL\n\n"
-            "Note: You can change this later if needed."
+            "• <b>vkd3d</b> - vkd3d-proton: Direct3D 12 on your GPU. The default choice.\n"
+            "• <b>DXVK</b> - Direct3D 11 on your GPU. Alternative if you encounter visual or window resizing issues.\n\n"
+            "Note: OpenCL compute acceleration operates independently of the graphics backend when compatible drivers are present. You can change this later if needed."
         )
         desc_label.setObjectName("descriptionLabel")
         desc_label.setWordWrap(True)
@@ -9061,7 +9060,7 @@ class AffinityInstallerGUI(QMainWindow):
         vkd3d_frame.setObjectName("optionFrame")
         vkd3d_layout = QVBoxLayout(vkd3d_frame)
         vkd3d_layout.setContentsMargins(12, 10, 12, 10)
-        vkd3d_radio = QRadioButton("vkd3d (with OpenCL support)")
+        vkd3d_radio = QRadioButton("vkd3d (Direct3D 12 - Recommended)")
         vkd3d_radio.setChecked(True)
         vkd3d_radio.setSizePolicy(
             QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum
@@ -9074,7 +9073,7 @@ class AffinityInstallerGUI(QMainWindow):
         dxvk_frame.setObjectName("optionFrame")
         dxvk_layout = QVBoxLayout(dxvk_frame)
         dxvk_layout.setContentsMargins(12, 10, 12, 10)
-        dxvk_radio = QRadioButton("DXVK (hardware accelerated, no OpenCL)")
+        dxvk_radio = QRadioButton("DXVK (Direct3D 11)")
         dxvk_radio.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Minimum)
         dxvk_layout.addWidget(dxvk_radio)
         options_layout.addWidget(dxvk_frame)
@@ -18777,10 +18776,9 @@ Would you like to continue with {distro_name} anyway?"""
             "• vkd3d-proton (or d3d12 DLLs / DXVK for AMD cards), which lets "
             "Affinity's Direct3D 12 canvas run on your graphics card\n"
             "• AMD OpenCL dependencies, if an AMD card is detected\n\n"
-            "OpenCL acceleration itself stays switched off on Wine 11.11 and "
-            "newer, because it has made Affinity hang at startup (seen on "
-            "Intel Arc; other cards untested). On an older Wine build it is "
-            "turned on too.\n\n"
+            "OpenCL acceleration itself stays switched off on Wine 11.11 to "
+            "11.18, because it made Affinity hang at startup; builds from "
+            "11.19 carry the fix.\n\n"
             "Set this up now?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.Yes,
