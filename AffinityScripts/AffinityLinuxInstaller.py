@@ -503,6 +503,37 @@ def winefix_disable_bezier_split_guard(install_dir):
     return True
 
 
+def winefix_disable_command_line_file_open(install_dir):
+    """Turn off WineFix's command_line_file_open in its settings file, creating
+    the file if WineFix has not written one yet. Returns True if the file changed.
+
+    When command_line_file_open is enabled, WineFix hooks SingleInstanceThread
+    and sends all arguments straight to LoadDocument, causing Affinity to treat
+    affinity:// Canva OAuth callback URLs as document file paths and fail with
+    'Failed to open file: The file was not found'.
+    affinity-on-linux.exe already handles document file opening properly, so
+    this patch is not needed and breaks Canva sign-in."""
+    config = Path(install_dir) / "apl" / "config" / "winefix.toml"
+    line = "command_line_file_open = false"
+    if not config.exists():
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(f"[patches]\n{line}\n")
+        return True
+    with open(config, newline="") as f:
+        text = f.read()
+    new, count = re.subn(r"(?m)^command_line_file_open\s*=\s*\w+[ \t]*(?=\r?$)", line, text)
+    if not count:
+        if re.search(r"(?m)^\[patches\][ \t]*\r?$", text):
+            new = re.sub(r"(?m)^\[patches\][ \t]*(\r?)$", lambda m: f"[patches]{m.group(1)}\n{line}{m.group(1)}", text, count=1)
+        else:
+            new = text + ("" if text.endswith("\n") or not text else "\n") + f"[patches]\n{line}\n"
+    if new == text:
+        return False
+    with open(config, "w", newline="") as f:
+        f.write(new)
+    return True
+
+
 def source_branch():
     return os.environ.get("AFFINITY_MANAGER_BRANCH", "").strip() or SOURCE_BRANCH
 
@@ -13828,6 +13859,12 @@ class AffinityInstallerGUI(QMainWindow):
         try:
             facades_installed = self.install_windowsruntime_facades()
             self.repair_affinity_url_protocol_command()
+            install_dir = Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
+            if install_dir.exists():
+                try:
+                    winefix_disable_command_line_file_open(install_dir)
+                except OSError:
+                    pass
             if self.create_affinity_url_handler() and facades_installed:
                 self.log("\n✓ Canva sign-in fix installed", "success")
             else:
@@ -20103,18 +20140,10 @@ Would you like to continue with {distro_name} anyway?"""
     def _affinity_url_handler_exec(self):
         """Return the Exec= line for the affinity:// handler.
 
-        It reuses the Exec= line of Affinity.desktop when that runs Wine directly, so a
-        cold start through the handler matches the desktop entry. Otherwise, for example
-        with the Ubuntu Snapshot launcher script, it builds the equivalent command.
+        It builds a command that launches Affinity.exe directly with the URL argument,
+        bypassing affinity-on-linux.exe (which only accepts local file paths).
         """
-        desktop_file = Path.home() / ".local" / "share" / "applications" / "Affinity.desktop"
-        try:
-            for line in desktop_file.read_text(encoding="utf-8").splitlines():
-                if line.startswith("Exec=") and re.search(r'(Affinity|AffinityHook)\.exe"\s*$', line):
-                    return line.rstrip()
-        except (OSError, UnicodeError):
-            pass
-        exec_line, _ = self._build_affinity_exec_line(prefer_hook=True)
+        exec_line, _ = self._build_affinity_exec_line(prefer_hook=False, for_url_handler=True)
         return exec_line
 
     def winmetadata_installed(self):
@@ -20209,10 +20238,13 @@ Would you like to continue with {distro_name} anyway?"""
 
         try:
             desktop_dir.mkdir(parents=True, exist_ok=True)
+            icon_path = Path.home() / ".local" / "share" / "icons" / "Affinity.svg"
             with open(handler_file, "w", encoding="utf-8") as f:
                 f.write("[Desktop Entry]\n")
                 f.write("Type=Application\n")
                 f.write("Name=Affinity sign-in handler\n")
+                if icon_path.exists():
+                    f.write(f"Icon={icon_path}\n")
                 f.write(f"{self._affinity_url_handler_exec()} %u\n")
                 f.write("MimeType=x-scheme-handler/affinity;\n")
                 f.write("NoDisplay=true\n")
@@ -20232,6 +20264,12 @@ Would you like to continue with {distro_name} anyway?"""
         try:
             if wine_protocol_entry.exists():
                 wine_protocol_entry.unlink()
+        except OSError:
+            pass
+        wine_extension_entry = desktop_dir / "wine-extension-af.desktop"
+        try:
+            if wine_extension_entry.exists():
+                wine_extension_entry.unlink()
         except OSError:
             pass
         if current != handler_file.name:
@@ -20455,6 +20493,18 @@ Would you like to continue with {distro_name} anyway?"""
             except Exception as e:
                 self.log(
                     f"Warning: Could not remove wine-protocol-affinity.desktop: {e}",
+                    "warning",
+                )
+
+        # Remove unaccelerated wine-extension-af.desktop file if present
+        wine_extension_entry = desktop_dir / "wine-extension-af.desktop"
+        if wine_extension_entry.exists():
+            try:
+                wine_extension_entry.unlink()
+                self.log("Removed unaccelerated wine-extension-af.desktop", "info")
+            except Exception as e:
+                self.log(
+                    f"Warning: Could not remove wine-extension-af.desktop: {e}",
                     "warning",
                 )
 
@@ -22643,6 +22693,7 @@ Would you like to continue with {distro_name} anyway?"""
             wine_desktop_dir / "Affinity Publisher 2.desktop",
             wine_desktop_dir / "Affinity Publisher.desktop",
             wine_desktop_dir / "Affinity.desktop",
+            desktop_dir / "wine-extension-af.desktop",
         ]
 
         for wine_entry in wine_entries:
@@ -23101,7 +23152,7 @@ Would you like to continue with {distro_name} anyway?"""
             return str(base / "Publisher 2" / "Publisher.exe").replace("\\", "/")
         return None
 
-    def _build_affinity_exec_line(self, prefer_hook=True):
+    def _build_affinity_exec_line(self, prefer_hook=True, for_url_handler=False):
         """Deterministically build a correct, fully-qualified Exec= line for the
         Affinity (Unified) app, rather than trying to parse/patch whatever text
         happens to already be in a .desktop file.
@@ -23124,7 +23175,11 @@ Would you like to continue with {distro_name} anyway?"""
         # lets a document be opened from the file manager, and a cold start still
         # goes through AffinityHook.exe, so preferring it here does not stop the
         # plugin loader from loading. Without it, behaviour is unchanged.
-        if handler_exe.exists():
+        # For the Canva URL handler, we must bypass affinity-on-linux.exe because
+        # it rejects non-file URLs, and launch Affinity.exe directly.
+        if for_url_handler:
+            exe_name = "Affinity.exe"
+        elif handler_exe.exists():
             exe_name = "affinity-on-linux.exe"
         elif prefer_hook and hook_exe.exists():
             exe_name = "AffinityHook.exe"
@@ -23149,7 +23204,7 @@ Would you like to continue with {distro_name} anyway?"""
         segments.append(f'"{app_path_str}"')
         # %F, not %f: every selected document goes to one invocation rather than
         # racing one process per file.
-        if exe_name == "affinity-on-linux.exe":
+        if exe_name == "affinity-on-linux.exe" and not for_url_handler:
             segments.append("%F")
 
         return "Exec=" + " ".join(segments), exe_name
@@ -23488,6 +23543,18 @@ Would you like to continue with {distro_name} anyway?"""
                         except OSError as exc:
                             self.log(
                                 f"  ⚠ Could not turn off WineFix's bezier split guard: {exc}",
+                                "warning",
+                            )
+                        try:
+                            if winefix_disable_command_line_file_open(install_dir):
+                                self.log(
+                                    "  ✓ WineFix's command_line_file_open is off: prevents "
+                                    "breaking Canva OAuth callback URLs",
+                                    "success",
+                                )
+                        except OSError as exc:
+                            self.log(
+                                f"  ⚠ Could not turn off WineFix's command_line_file_open: {exc}",
                                 "warning",
                             )
 

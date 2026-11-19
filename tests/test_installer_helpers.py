@@ -1469,3 +1469,31 @@ def test_winefix_guard_off_added_when_the_key_is_missing(ali, tmp_path):
     config.write_text("[crash-fixes]\npin_plugin_host = true\n")
     ali.winefix_disable_bezier_split_guard(tmp_path)
     assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\nbezier_split_guard = false\n"
+
+
+def test_winefix_command_line_file_open_off_in_a_new_settings_file(ali, tmp_path):
+    assert ali.winefix_disable_command_line_file_open(tmp_path)
+    assert (tmp_path / "apl/config/winefix.toml").read_text() == "[patches]\ncommand_line_file_open = false\n"
+
+
+def test_winefix_command_line_file_open_off_keeps_the_rest_and_the_line_ends(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_bytes(b"[patches]\r\n# File open\r\ncommand_line_file_open = true\r\nwiden_stub_fix = true\r\n")
+    assert ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_bytes() == (
+        b"[patches]\r\n# File open\r\ncommand_line_file_open = false\r\nwiden_stub_fix = true\r\n")
+    assert not ali.winefix_disable_command_line_file_open(tmp_path)
+
+
+def test_winefix_command_line_file_open_off_added_when_the_key_is_missing(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[patches]\nwiden_stub_fix = true\n\n[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_text() == (
+        "[patches]\ncommand_line_file_open = false\nwiden_stub_fix = true\n\n"
+        "[crash-fixes]\npin_plugin_host = true\n")
+    config.write_text("[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\ncommand_line_file_open = false\n"
