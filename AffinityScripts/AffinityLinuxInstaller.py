@@ -9638,6 +9638,11 @@ class AffinityInstallerGUI(QMainWindow):
         )
 
         try:
+            # 0. Stop prefix Wine processes to avoid file locks
+            env = os.environ.copy()
+            env = self.get_winetricks_env(env)
+            self.stop_prefix_wine_processes(env, reason="switching to VKD3D")
+
             # 1. Install vkd3d-proton (full setup)
             self.log("Installing vkd3d-proton...", "info")
             self.setup_vkd3d()
@@ -14591,22 +14596,23 @@ class AffinityInstallerGUI(QMainWindow):
         removed_count = 0
 
         for dll in dxvk_dlls:
-            success, _, _ = self.run_command(
-                [
-                    str(wine),
-                    "reg",
-                    "delete",
-                    "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides",
-                    "/v",
-                    dll,
-                    "/f",
-                ],
-                check=False,
-                env=env,
-                capture=True,
-            )
-            if success:
-                removed_count += 1
+            for variant in (dll, f"*{dll}"):
+                success, _, _ = self.run_command(
+                    [
+                        str(wine),
+                        "reg",
+                        "delete",
+                        "HKEY_CURRENT_USER\\Software\\Wine\\DllOverrides",
+                        "/v",
+                        variant,
+                        "/f",
+                    ],
+                    check=False,
+                    env=env,
+                    capture=True,
+                )
+                if success:
+                    removed_count += 1
 
         if removed_count > 0:
             self.log(f"Removed {removed_count} DXVK DLL override(s)", "success")
@@ -14614,6 +14620,15 @@ class AffinityInstallerGUI(QMainWindow):
             self.log("No DXVK DLL overrides found to remove", "info")
 
         self.remove_dxvk_dlls_from_system32()
+
+        # Restore Wine's builtin DirectX DLLs in system32 so dependencies
+        # (like libdxcore.dll linking against d3d11.dll) resolve properly.
+        self.log("Restoring Wine's builtin DirectX DLLs in system32...", "info")
+        wineboot = self.get_wine_path("wineboot")
+        boot_cmd = [str(wineboot), "-u"] if wineboot.exists() else [str(wine), "wineboot", "-u"]
+        self.run_command(boot_cmd, check=False, env=env, capture=True)
+        if self.wine_resolves_winrt_namespaces():
+            self.clear_shadowing_winmds(quiet=True)
 
         cache_dir = Path(self.directory) / "dxvk"
         if cache_dir.exists():
@@ -14624,29 +14639,33 @@ class AffinityInstallerGUI(QMainWindow):
                 self.log(f"Warning: Could not remove DXVK cache: {e}", "warning")
 
     def remove_dxvk_dlls_from_system32(self):
-        """Remove DXVK DLLs from system32 directory"""
+        """Remove DXVK DLLs from system32 and syswow64 directories"""
         self.log("Removing DXVK DLLs from system32...", "info")
 
         system32_dir = Path(self.directory) / "drive_c" / "windows" / "system32"
+        syswow64_dir = Path(self.directory) / "drive_c" / "windows" / "syswow64"
         dxvk_dlls = ["d3d8.dll", "d3d9.dll", "d3d10core.dll", "d3d11.dll", "dxgi.dll"]
         removed_count = 0
 
-        for dll in dxvk_dlls:
-            dll_path = system32_dir / dll
-            if dll_path.exists():
-                try:
-                    dll_path.unlink()
-                    self.log(f"Removed {dll} from system32", "success")
-                    removed_count += 1
-                except Exception as e:
-                    self.log(
-                        f"Warning: Could not remove {dll} from system32: {e}", "warning"
-                    )
+        for target_dir in [system32_dir, syswow64_dir]:
+            if not target_dir.exists():
+                continue
+            for dll in dxvk_dlls:
+                dll_path = target_dir / dll
+                if dll_path.exists():
+                    try:
+                        dll_path.unlink()
+                        self.log(f"Removed {dll} from {target_dir.name}", "success")
+                        removed_count += 1
+                    except Exception as e:
+                        self.log(
+                            f"Warning: Could not remove {dll} from {target_dir.name}: {e}", "warning"
+                        )
 
         if removed_count > 0:
-            self.log(f"Removed {removed_count} DXVK DLL(s) from system32", "success")
+            self.log(f"Removed {removed_count} DXVK DLL(s)", "success")
         else:
-            self.log("No DXVK DLLs found in system32 to remove", "info")
+            self.log("No DXVK DLLs found to remove", "info")
 
     def remove_d3d12_overrides(self):
         """Remove DLL overrides for vkd3d (d3d12, d3d12core)"""
