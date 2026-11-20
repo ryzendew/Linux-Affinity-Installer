@@ -490,7 +490,7 @@ def winefix_disable_bezier_split_guard(install_dir):
     # newline="" keeps a CRLF file CRLF.
     with open(config, newline="") as f:
         text = f.read()
-    new, count = re.subn(r"(?m)^bezier_split_guard\s*=\s*\w+[ \t]*(?=\r?$)", line, text)
+    new, count = re.subn(r"(?m)^bezier_split_guard\s*=\s*\w+([ \t]*#[^\r\n]*)?(?=\r?$)", line, text)
     if not count:
         if re.search(r"(?m)^\[patches\][ \t]*\r?$", text):
             new = re.sub(r"(?m)^\[patches\][ \t]*(\r?)$", lambda m: f"[patches]{m.group(1)}\n{line}{m.group(1)}", text, count=1)
@@ -521,7 +521,7 @@ def winefix_disable_command_line_file_open(install_dir):
         return True
     with open(config, newline="") as f:
         text = f.read()
-    new, count = re.subn(r"(?m)^command_line_file_open\s*=\s*\w+[ \t]*(?=\r?$)", line, text)
+    new, count = re.subn(r"(?m)^command_line_file_open\s*=\s*\w+([ \t]*#[^\r\n]*)?(?=\r?$)", line, text)
     if not count:
         if re.search(r"(?m)^\[patches\][ \t]*\r?$", text):
             new = re.sub(r"(?m)^\[patches\][ \t]*(\r?)$", lambda m: f"[patches]{m.group(1)}\n{line}{m.group(1)}", text, count=1)
@@ -10151,10 +10151,18 @@ class AffinityInstallerGUI(QMainWindow):
                         wine_path = str(wine)
 
                         # Rebuild Exec line with new GPU env vars
+                        prefix_arg = (
+                            f'WINEPREFIX="{directory_str}"'
+                            if " " in directory_str
+                            else f"WINEPREFIX={directory_str}"
+                        )
                         exec_parts = ["Exec="]
                         if launch_prefix:
                             exec_parts.append(" ".join(shlex.quote(part) for part in launch_prefix))
-                        exec_parts.append(f"env WINEPREFIX={directory_str}")
+                        if not launch_prefix or launch_prefix[-1] != "env":
+                            exec_parts.append(f"env {prefix_arg}")
+                        else:
+                            exec_parts.append(prefix_arg)
                         exec_parts.extend(desktop_env_parts)
                         exec_parts.append(wine_path)
                         if app_path:
@@ -13857,15 +13865,17 @@ class AffinityInstallerGUI(QMainWindow):
     def _fix_canva_sign_in_entry(self):
         """Wrapper: install the WinRT facades and the affinity:// handler, then end the operation."""
         try:
-            facades_installed = self.install_windowsruntime_facades()
-            self.repair_affinity_url_protocol_command()
+            winefix_ok = True
             install_dir = Path(self.directory) / "drive_c" / "Program Files" / "Affinity" / "Affinity"
             if install_dir.exists():
                 try:
                     winefix_disable_command_line_file_open(install_dir)
-                except OSError:
-                    pass
-            if self.create_affinity_url_handler() and facades_installed:
+                except OSError as exc:
+                    winefix_ok = False
+                    self.log(f"⚠ Could not update winefix.toml: {exc}", "warning")
+            facades_installed = self.install_windowsruntime_facades()
+            self.repair_affinity_url_protocol_command()
+            if winefix_ok and facades_installed and self.create_affinity_url_handler():
                 self.log("\n✓ Canva sign-in fix installed", "success")
             else:
                 self.log("\n✗ Canva sign-in fix not installed, see the messages above", "error")
@@ -17251,10 +17261,18 @@ Would you like to continue with {distro_name} anyway?"""
             f.write(f"Path={directory_str}\n")
             # Use Linux path format with proper quoting for spaces
             # Include GPU environment variables if configured
+            prefix_arg = (
+                f'WINEPREFIX="{directory_str}"'
+                if " " in directory_str
+                else f"WINEPREFIX={directory_str}"
+            )
             exec_parts = ["Exec="]
             if launch_prefix:
                 exec_parts.append(" ".join(shlex.quote(part) for part in launch_prefix))
-            exec_parts.append(f"env WINEPREFIX={directory_str}")
+            if not launch_prefix or launch_prefix[-1] != "env":
+                exec_parts.append(f"env {prefix_arg}")
+            else:
+                exec_parts.append(prefix_arg)
             exec_parts.extend(desktop_env_parts)
             exec_parts.append(wine_str)
             exec_parts.append(f'"{exe_path_normalized}"')
@@ -20439,10 +20457,18 @@ Would you like to continue with {distro_name} anyway?"""
             f.write(f"Path={directory_str}\n")
             # Use Linux path format with proper quoting for spaces
             # Include GPU environment variables if configured
+            prefix_arg = (
+                f'WINEPREFIX="{directory_str}"'
+                if " " in directory_str
+                else f"WINEPREFIX={directory_str}"
+            )
             exec_parts = ["Exec="]
             if launch_prefix:
                 exec_parts.append(" ".join(shlex.quote(part) for part in launch_prefix))
-            exec_parts.append(f"env WINEPREFIX={directory_str}")
+            if not launch_prefix or launch_prefix[-1] != "env":
+                exec_parts.append(f"env {prefix_arg}")
+            else:
+                exec_parts.append(prefix_arg)
             exec_parts.extend(desktop_env_parts)
             exec_parts.append(wine_str)
             exec_parts.append(f'"{app_path_str}"')
@@ -23189,13 +23215,25 @@ Would you like to continue with {distro_name} anyway?"""
 
         wine_str = str(self.get_wine_path("wine"))
         directory_str = str(self.directory).rstrip("/")
+        prefix_arg = (
+            f'WINEPREFIX="{directory_str}"'
+            if " " in directory_str
+            else f"WINEPREFIX={directory_str}"
+        )
 
         # get_gpu_env_vars()/get_dxvk_env_vars() already return a trailing space
         # when non-empty, so strip before joining to avoid doubled-up spaces.
         gpu_env = self.get_gpu_env_vars().strip()
         dxvk_env = self.get_dxvk_env_vars().strip()
+        launch_prefix = self.get_gpu_launch_prefix()
 
-        segments = [f"env WINEPREFIX={directory_str}"]
+        segments = []
+        if launch_prefix:
+            segments.append(" ".join(shlex.quote(part) for part in launch_prefix))
+        if not launch_prefix or launch_prefix[-1] != "env":
+            segments.append(f"env {prefix_arg}")
+        else:
+            segments.append(prefix_arg)
         if gpu_env:
             segments.append(gpu_env)
         if dxvk_env:
