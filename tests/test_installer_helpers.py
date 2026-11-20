@@ -1469,3 +1469,89 @@ def test_winefix_guard_off_added_when_the_key_is_missing(ali, tmp_path):
     config.write_text("[crash-fixes]\npin_plugin_host = true\n")
     ali.winefix_disable_bezier_split_guard(tmp_path)
     assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\nbezier_split_guard = false\n"
+
+
+def test_winefix_command_line_file_open_off_in_a_new_settings_file(ali, tmp_path):
+    assert ali.winefix_disable_command_line_file_open(tmp_path)
+    assert (tmp_path / "apl/config/winefix.toml").read_text() == "[patches]\ncommand_line_file_open = false\n"
+
+
+def test_winefix_command_line_file_open_off_keeps_the_rest_and_the_line_ends(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_bytes(b"[patches]\r\n# File open\r\ncommand_line_file_open = true\r\nwiden_stub_fix = true\r\n")
+    assert ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_bytes() == (
+        b"[patches]\r\n# File open\r\ncommand_line_file_open = false\r\nwiden_stub_fix = true\r\n")
+    assert not ali.winefix_disable_command_line_file_open(tmp_path)
+
+
+def test_winefix_command_line_file_open_off_added_when_the_key_is_missing(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[patches]\nwiden_stub_fix = true\n\n[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_text() == (
+        "[patches]\ncommand_line_file_open = false\nwiden_stub_fix = true\n\n"
+        "[crash-fixes]\npin_plugin_host = true\n")
+    config.write_text("[crash-fixes]\npin_plugin_host = true\n")
+    ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_text() == "[crash-fixes]\npin_plugin_host = true\n[patches]\ncommand_line_file_open = false\n"
+
+
+def test_winefix_command_line_file_open_off_handles_inline_comments(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[patches]\ncommand_line_file_open = true # keep files open\nwiden_stub_fix = true\n")
+    assert ali.winefix_disable_command_line_file_open(tmp_path)
+    assert config.read_text() == "[patches]\ncommand_line_file_open = false\nwiden_stub_fix = true\n"
+    assert not ali.winefix_disable_command_line_file_open(tmp_path)
+
+
+def test_winefix_guard_off_handles_inline_comments(ali, tmp_path):
+    config = tmp_path / "apl/config/winefix.toml"
+    config.parent.mkdir(parents=True)
+    config.write_text("[patches]\nbezier_split_guard = true # inline explanation\n")
+    assert ali.winefix_disable_bezier_split_guard(tmp_path)
+    assert config.read_text() == "[patches]\nbezier_split_guard = false\n"
+    assert not ali.winefix_disable_bezier_split_guard(tmp_path)
+
+
+def test_build_affinity_exec_line_quotes_spaces_and_prepends_gpu_launch_prefix(ali, tmp_path):
+    class StandIn:
+        directory = str(tmp_path / "Custom Prefix With Space")
+        get_wine_path = staticmethod(lambda binary: f"/usr/bin/{binary}")
+        get_gpu_env_vars = staticmethod(lambda: "__NV_PRIME_RENDER_OFFLOAD=1 ")
+        get_dxvk_env_vars = staticmethod(lambda: "")
+        get_gpu_launch_prefix = staticmethod(lambda: ["/usr/bin/switcherooctl", "launch", "env"])
+
+    for name in ("_build_affinity_exec_line",):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+
+    obj = StandIn()
+    exec_line, exe_name = obj._build_affinity_exec_line(for_url_handler=True)
+    assert exe_name == "Affinity.exe"
+    assert f'WINEPREFIX="{obj.directory}"' in exec_line
+    assert exec_line.startswith("Exec=/usr/bin/switcherooctl launch env WINEPREFIX=")
+    assert not exec_line.startswith("Exec=/usr/bin/switcherooctl launch env env")
+    assert "__NV_PRIME_RENDER_OFFLOAD=1" in exec_line
+    assert 'Affinity.exe"' in exec_line
+
+
+def test_build_affinity_exec_line_no_spaces_no_launch_prefix(ali, tmp_path):
+    class StandIn:
+        directory = str(tmp_path / "normal_prefix")
+        get_wine_path = staticmethod(lambda binary: f"/usr/bin/{binary}")
+        get_gpu_env_vars = staticmethod(lambda: "")
+        get_dxvk_env_vars = staticmethod(lambda: "")
+        get_gpu_launch_prefix = staticmethod(lambda: [])
+
+    for name in ("_build_affinity_exec_line",):
+        setattr(StandIn, name, inspect.getattr_static(ali.AffinityInstallerGUI, name))
+
+    obj = StandIn()
+    exec_line, exe_name = obj._build_affinity_exec_line(for_url_handler=True)
+    assert exe_name == "Affinity.exe"
+    assert f"WINEPREFIX={obj.directory}" in exec_line
+    assert f'WINEPREFIX="{obj.directory}"' not in exec_line
+    assert exec_line.startswith(f"Exec=env WINEPREFIX={obj.directory}")
